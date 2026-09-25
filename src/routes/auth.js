@@ -270,7 +270,7 @@ router.post(
 );
 
 /** GET /api/auth/2fa/status — requires Bearer token */
-router.get('/2fa/status', requireAuth, async (req, res) => {
+router.get('/2fa/status', requireAuth, ah(async (req, res) => {
   const [rows] = await pool.query('SELECT twofa_enabled, twofa_backup_codes FROM users WHERE id = ?', [
     req.user.id,
   ]);
@@ -279,7 +279,7 @@ router.get('/2fa/status', requireAuth, async (req, res) => {
     enabled: !!rows[0].twofa_enabled,
     backupCodesRemaining: parseBackupHashes(rows[0]).length,
   });
-});
+}));
 
 /**
  * POST /api/auth/2fa/setup — requires Bearer token.
@@ -381,10 +381,10 @@ router.post(
 );
 
 /** GET /api/auth/me — requires Bearer token */
-router.get('/me', requireAuth, async (req, res) => {
+router.get('/me', requireAuth, ah(async (req, res) => {
   const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
   if (rows.length === 0) throw notFound('User not found');
   res.json(mapUser(rows[0]));
-});
+}));
 
 export default router;
