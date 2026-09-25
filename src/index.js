@@ -2,6 +2,8 @@ import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
 import { pool, migrate, pingDb } from './db.js';
+import auth from './routes/auth.js';
+import { requireAuth } from './middleware/auth.js';
 import batches from './routes/batches.js';
 import sales from './routes/sales.js';
 import loans from './routes/loans.js';
@@ -23,6 +25,15 @@ const allowed = String(
 app.use(cors({ origin: allowed, credentials: false }));
 app.use(express.json({ limit: '1mb' }));
 
+app.get('/', (req, res) => {
+  res.json({
+    ok: true,
+    name: 'mining-backend',
+    message: 'API running. See /api/health',
+    health: '/api/health',
+  });
+});
+
 app.get('/api/health', async (req, res) => {
   try {
     await pingDb();
@@ -32,12 +43,13 @@ app.get('/api/health', async (req, res) => {
   }
 });
 
-app.use('/api/batches', batches);
-app.use('/api/sales', sales);
-app.use('/api/loans', loans);
-app.use('/api/expenditures', expenditures);
-app.use('/api/withdrawals', withdrawals);
-app.use('/api/capital', capital);
+app.use('/api/auth', auth);
+app.use('/api/batches', requireAuth, batches);
+app.use('/api/sales', requireAuth, sales);
+app.use('/api/loans', requireAuth, loans);
+app.use('/api/expenditures', requireAuth, expenditures);
+app.use('/api/withdrawals', requireAuth, withdrawals);
+app.use('/api/capital', requireAuth, capital);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

@@ -43,6 +43,9 @@ Settings to use when creating a **Web Service** on [render.com](https://render.c
    DB_NAME=mining_ledger
    DB_SSL=true
    AUTO_MIGRATE=1
+   JWT_SECRET=<long-random-string>
+   JWT_EXPIRES_IN=7d
+   ALLOW_PUBLIC_REGISTER=true
    ```
    Or instead of the discrete `DB_*` vars, set a single `DATABASE_URL=mysql://<user>:<password>@<host>:4000/<db>?sslaccept=strict`.
 5. Deploy. Verify with `GET https://your-api.onrender.com/api/health` → `{ ok: true, db: "up" }`.
@@ -65,9 +68,14 @@ Settings to use when creating a **Web Service** on [render.com](https://render.c
 
 ## Endpoints (all JSON, all match the React frontend)
 
+All data endpoints require `Authorization: Bearer <token>`. Get a token via `/api/auth`.
+
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| GET | `/api/batches?status=OPEN` | — | newest first |
+| POST | `/api/auth/register` | `{ name, email, password }` | min 6-char password, returns `{ user, token }` |
+| POST | `/api/auth/login` | `{ email, password }` | returns `{ user, token }` |
+| GET | `/api/auth/me` | — | requires token |
+| GET | `/api/batches?status=OPEN` | — | newest first, requires token |
 | GET | `/api/batches/:id` | — | |
 | POST | `/api/batches` | `{ itemName, gramsBought, pricePerGram, purchaseDate? }` | auto number `B-101…` |
 | GET | `/api/sales` | — | includes `batchNumber`, `totalSellingPrice`, `profitLoss` |
