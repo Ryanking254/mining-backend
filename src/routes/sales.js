@@ -23,31 +23,51 @@ router.get(
 
 /**
  * GET /api/sales/summary?range=daily|weekly|monthly
+ * ...or with a custom calendar window:
+ * GET /api/sales/summary?from=YYYY-MM-DD&to=YYYY-MM-DD&bucket=daily|weekly|monthly
  * Returns [{ period, revenue, profit }].
- *  - daily   -> per day for the last 30 days
- *  - weekly  -> per ISO week for the last 12 weeks
- *  - monthly -> per month for the last 6 months
+ *  - daily   -> per day (preset: last 30 days)
+ *  - weekly  -> per ISO week (preset: last 12 weeks)
+ *  - monthly -> per month (preset: last 6 months)
  */
 router.get(
   '/summary',
   ah(async (req, res) => {
-    const range = String(req.query.range || 'monthly').toLowerCase();
+    const bucketParam = String(req.query.bucket || req.query.range || 'monthly').toLowerCase();
+    const bucket = ['daily', 'weekly', 'monthly'].includes(bucketParam) ? bucketParam : 'monthly';
+    const { from, to } = req.query;
+
     let groupExpr;
     let periodExpr;
-    let interval;
 
-    if (range === 'daily') {
+    if (bucket === 'daily') {
       groupExpr = 'DATE(s.sale_date)';
       periodExpr = "DATE_FORMAT(s.sale_date, '%d %b')";
-      interval = 'INTERVAL 30 DAY';
-    } else if (range === 'weekly') {
+    } else if (bucket === 'weekly') {
       groupExpr = 'YEARWEEK(s.sale_date, 3)';
       periodExpr = "CONCAT('W', WEEK(s.sale_date, 3))";
-      interval = 'INTERVAL 12 WEEK';
     } else {
       groupExpr = "DATE_FORMAT(s.sale_date, '%Y-%m')";
       periodExpr = "DATE_FORMAT(s.sale_date, '%b')";
-      interval = 'INTERVAL 6 MONTH';
+    }
+
+    const isDate = (v) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v));
+
+    let where;
+    let params = [];
+    if (from !== undefined || to !== undefined) {
+      // Custom calendar window — both ends required.
+      if (!isDate(from)) throw badRequest('from must be YYYY-MM-DD');
+      if (!isDate(to)) throw badRequest('to must be YYYY-MM-DD');
+      if (from > to) throw badRequest('from must be on or before to');
+      where = 'WHERE s.sale_date >= ? AND s.sale_date <= ?';
+      params = [from, to];
+    } else if (bucket === 'daily') {
+      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)';
+    } else if (bucket === 'weekly') {
+      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 12 WEEK)';
+    } else {
+      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)';
     }
 
     const [rows] = await pool.query(
@@ -55,8 +75,9 @@ router.get(
               SUM(s.total_selling_price) AS revenue,
               SUM(s.profit_loss) AS profit
        FROM sales s
-       WHERE s.sale_date >= DATE_SUB(CURDATE(), ${interval})
-       GROUP BY grp ORDER BY MIN(s.sale_date) ASC`
+       ${where}
+       GROUP BY grp ORDER BY MIN(s.sale_date) ASC`,
+      params
     );
     res.json(
       rows.map((r) => ({

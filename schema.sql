@@ -84,3 +84,19 @@ CREATE TABLE IF NOT EXISTS capital_settings (
 );
 
 INSERT IGNORE INTO capital_settings (id, starting_capital) VALUES (1, 0);
+
+-- Users: password login + Google OAuth + TOTP 2FA (Google Authenticator compatible).
+-- password_hash is NULL for Google-only accounts; google_id links the Google identity.
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NULL,
+  google_id VARCHAR(255) NULL UNIQUE,
+  avatar_url TEXT NULL,
+  twofa_secret VARCHAR(255) NULL,
+  twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
+  twofa_backup_codes TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_users_email (email)
+);

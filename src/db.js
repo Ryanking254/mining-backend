@@ -137,7 +137,12 @@ export async function migrate() {
       id INT AUTO_INCREMENT PRIMARY KEY,
       name VARCHAR(255) NOT NULL,
       email VARCHAR(255) NOT NULL UNIQUE,
-      password_hash VARCHAR(255) NOT NULL,
+      password_hash VARCHAR(255) NULL,
+      google_id VARCHAR(255) NULL UNIQUE,
+      avatar_url TEXT NULL,
+      twofa_secret VARCHAR(255) NULL,
+      twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
+      twofa_backup_codes TEXT NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_users_email (email)
     )`,
@@ -156,5 +161,39 @@ export async function migrate() {
     }
   } catch {
     /* ignore — fresh installs already have the column */
+  }
+
+  // Backfill: auth upgrades — Google OAuth + TOTP 2FA columns on users.
+  // password_hash becomes nullable (Google-only accounts have no password).
+  try {
+    await pool.query(`ALTER TABLE users MODIFY COLUMN password_hash VARCHAR(255) NULL`);
+  } catch {
+    /* ignore */
+  }
+  const userCols = [
+    ['google_id', 'google_id VARCHAR(255) NULL'],
+    ['avatar_url', 'avatar_url TEXT NULL'],
+    ['twofa_secret', 'twofa_secret VARCHAR(255) NULL'],
+    ['twofa_enabled', 'twofa_enabled TINYINT(1) NOT NULL DEFAULT 0'],
+    ['twofa_backup_codes', 'twofa_backup_codes TEXT NULL'],
+  ];
+  for (const [col, def] of userCols) {
+    try {
+      const [existing] = await pool.query(`SHOW COLUMNS FROM users LIKE ?`, [col]);
+      if (existing.length === 0) {
+        await pool.query(`ALTER TABLE users ADD COLUMN ${def}`);
+      }
+    } catch {
+      /* ignore — best effort */
+    }
+  }
+  // Unique index on google_id (allows multiple NULLs in MySQL/TiDB).
+  try {
+    const [idx] = await pool.query(`SHOW INDEX FROM users WHERE Key_name = 'uq_users_google_id'`);
+    if (idx.length === 0) {
+      await pool.query(`ALTER TABLE users ADD UNIQUE INDEX uq_users_google_id (google_id)`);
+    }
+  } catch {
+    /* ignore — may already exist via UNIQUE column definition on fresh installs */
   }
 }

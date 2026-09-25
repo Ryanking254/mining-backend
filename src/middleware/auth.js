@@ -19,6 +19,19 @@ export function signToken(user) {
   );
 }
 
+/** Short-lived token issued after password/Google check when 2FA is enabled. */
+export function signPendingToken(userId) {
+  return jwt.sign({ id: userId, purpose: '2fa-pending' }, getSecret(), { expiresIn: '10m' });
+}
+
+export function verifyPendingToken(token) {
+  const payload = jwt.verify(token, getSecret());
+  if (!payload || payload.purpose !== '2fa-pending' || !payload.id) {
+    throw new Error('Invalid pending token');
+  }
+  return payload;
+}
+
 export function requireAuth(req, res, next) {
   const header = req.headers.authorization || '';
   const [scheme, token] = header.split(' ');
