@@ -3,7 +3,7 @@ import express from 'express';
 import cors from 'cors';
 import { pool, migrate, pingDb } from './db.js';
 import auth from './routes/auth.js';
-import { requireAuth } from './middleware/auth.js';
+import { requireAuth, enforceTwofa } from './middleware/auth.js';
 import batches from './routes/batches.js';
 import sales from './routes/sales.js';
 import loans from './routes/loans.js';
@@ -44,12 +44,14 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.use('/api/auth', auth);
-app.use('/api/batches', requireAuth, batches);
-app.use('/api/sales', requireAuth, sales);
-app.use('/api/loans', requireAuth, loans);
-app.use('/api/expenditures', requireAuth, expenditures);
-app.use('/api/withdrawals', requireAuth, withdrawals);
-app.use('/api/capital', requireAuth, capital);
+// Ledger data is blocked once the authenticator grace period expires.
+// Auth endpoints stay reachable so overdue users can still complete setup.
+app.use('/api/batches', requireAuth, enforceTwofa, batches);
+app.use('/api/sales', requireAuth, enforceTwofa, sales);
+app.use('/api/loans', requireAuth, enforceTwofa, loans);
+app.use('/api/expenditures', requireAuth, enforceTwofa, expenditures);
+app.use('/api/withdrawals', requireAuth, enforceTwofa, withdrawals);
+app.use('/api/capital', requireAuth, enforceTwofa, capital);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

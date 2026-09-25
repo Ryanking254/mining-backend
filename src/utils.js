@@ -18,6 +18,49 @@ export const num = (v, fallback = 0) => {
   return Number.isFinite(n) ? n : fallback;
 };
 
+/* ---- Mandatory authenticator (TOTP) grace period ---- */
+// Accounts must enable the authenticator app within TWOFA_GRACE_DAYS of
+// creation. Keep in sync with the frontend grace helper (VITE_TWOFA_GRACE_DAYS).
+export function getTwofaGraceDays() {
+  const n = Number(process.env.TWOFA_GRACE_DAYS ?? 7);
+  return Number.isFinite(n) && n >= 0 ? n : 7;
+}
+
+/** Parse DB timestamps defensively (mysql dateStrings can be 'YYYY-MM-DD HH:mm:ss'). */
+export function parseDbDate(v) {
+  if (!v) return null;
+  if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v;
+  const s = String(v).trim();
+  let d = new Date(s);
+  if (Number.isNaN(d.getTime()) && s.includes(' ')) {
+    d = new Date(s.replace(' ', 'T'));
+  }
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+
+/**
+ * Totp grace state for a user row ({ created_at, twofa_enabled }).
+ * Returns { enabled, required, graceDays, deadline (ISO|null), daysLeft, overdue }.
+ */
+export function twofaGraceState(row, now = new Date()) {
+  const enabled = !!row?.twofa_enabled;
+  const graceDays = getTwofaGraceDays();
+  if (enabled) {
+    return { enabled: true, required: false, graceDays, deadline: null, daysLeft: 0, overdue: false };
+  }
+  const created = parseDbDate(row?.created_at);
+  const deadline = created ? new Date(created.getTime() + graceDays * 86400000) : null;
+  const daysLeft = deadline ? Math.ceil((deadline.getTime() - now.getTime()) / 86400000) : graceDays;
+  return {
+    enabled: false,
+    required: true,
+    graceDays,
+    deadline: deadline ? deadline.toISOString() : null,
+    daysLeft: Math.max(daysLeft, 0),
+    overdue: deadline ? now.getTime() > deadline.getTime() : false,
+  };
+}
+
 export function todayISO() {
   return new Date().toISOString().slice(0, 10);
 }

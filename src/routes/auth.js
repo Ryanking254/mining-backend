@@ -5,7 +5,7 @@ import speakeasy from 'speakeasy';
 import QRCode from 'qrcode';
 import { OAuth2Client } from 'google-auth-library';
 import { pool } from '../db.js';
-import { ah, badRequest, notFound } from '../utils.js';
+import { ah, badRequest, notFound, twofaGraceState } from '../utils.js';
 import { signToken, signPendingToken, verifyPendingToken } from '../middleware/auth.js';
 import { requireAuth } from '../middleware/auth.js';
 
@@ -271,13 +271,20 @@ router.post(
 
 /** GET /api/auth/2fa/status — requires Bearer token */
 router.get('/2fa/status', requireAuth, ah(async (req, res) => {
-  const [rows] = await pool.query('SELECT twofa_enabled, twofa_backup_codes FROM users WHERE id = ?', [
-    req.user.id,
-  ]);
+  const [rows] = await pool.query(
+    'SELECT twofa_enabled, twofa_backup_codes, created_at FROM users WHERE id = ?',
+    [req.user.id]
+  );
   if (rows.length === 0) throw notFound('User not found');
+  const grace = twofaGraceState({ twofa_enabled: rows[0].twofa_enabled, created_at: rows[0].created_at });
   res.json({
     enabled: !!rows[0].twofa_enabled,
     backupCodesRemaining: parseBackupHashes(rows[0]).length,
+    required: grace.required,
+    overdue: grace.overdue,
+    graceDays: grace.graceDays,
+    daysLeft: grace.daysLeft,
+    deadline: grace.deadline,
   });
 }));
 
@@ -339,46 +346,14 @@ router.post(
 );
 
 /**
- * POST /api/auth/2fa/disable — Body: { code } or { password }.
- * Requires a current TOTP code (or the account password) to disable.
+ * POST /api/auth/2fa/disable — permanently disabled by policy.
+ * The authenticator app is mandatory, so there is no supported way to turn
+ * it off. Kept as an explicit 403 (instead of 404) so old clients get a
+ * clear message.
  */
-router.post(
-  '/2fa/disable',
-  requireAuth,
-  ah(async (req, res) => {
-    const { code, password } = req.body ?? {};
-    const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
-    if (rows.length === 0) throw notFound('User not found');
-    const row = rows[0];
-    if (!row.twofa_enabled) return res.json({ disabled: true });
-
-    let ok = false;
-    if (typeof code === 'string' && code.trim() !== '' && row.twofa_secret) {
-      ok = speakeasy.totp.verify({
-        secret: row.twofa_secret,
-        encoding: 'base32',
-        token: String(code).trim(),
-        window: 1,
-      });
-    }
-    if (!ok && typeof password === 'string' && password !== '' && row.password_hash) {
-      ok = await bcrypt.compare(password, row.password_hash);
-    }
-    // Also accept a backup code for recovery.
-    if (!ok && typeof code === 'string' && code.trim() !== '') {
-      const candidate = String(code).trim().toUpperCase().replace(/[\s-]/g, '');
-      const hashes = parseBackupHashes(row);
-      if (hashes.includes(hashBackupCode(candidate))) ok = true;
-    }
-    if (!ok) return res.status(401).json({ error: 'Invalid code or password' });
-
-    await pool.query(
-      'UPDATE users SET twofa_enabled = 0, twofa_secret = NULL, twofa_backup_codes = NULL WHERE id = ?',
-      [row.id]
-    );
-    res.json({ disabled: true });
-  })
-);
+router.post('/2fa/disable', requireAuth, (req, res) => {
+  res.status(403).json({ error: 'Disabling two-factor authentication is not allowed.' });
+});
 
 /** GET /api/auth/me — requires Bearer token */
 router.get('/me', requireAuth, ah(async (req, res) => {
