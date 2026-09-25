@@ -4,6 +4,8 @@ Express + MySQL backend for the Mining Website ledger. Works with local MySQL/Ma
 
 Frontend expects the API at `http://localhost:8080/api` (see `Mining-Website/.env` → `VITE_API_BASE_URL`).
 
+Production frontend: `https://mining-ledger.vercel.app`.
+
 ## Quick start
 
 ```bash
@@ -14,6 +16,36 @@ npm run dev            # or: npm start
 ```
 
 Health check: `GET http://localhost:8080/api/health` → `{ ok: true, db: "up" }`.
+
+## Deploy on Render
+
+Settings to use when creating a **Web Service** on [render.com](https://render.com):
+
+| Setting | Value |
+|---|---|
+| Environment | `Node` |
+| Build Command | `npm install` |
+| Start Command | `npm start` |
+
+> This project has no build step (plain Node.js + Express), so the build command just installs dependencies. The start command runs `node src/index.js` via `npm start`.
+
+1. Push this folder to GitHub.
+2. On Render: **New → Web Service →** select the repo.
+3. Set **Build Command** to `npm install` and **Start Command** to `npm start`.
+4. Add these **Environment Variables** (Render Dashboard → Environment):
+   ```env
+   PORT=8080
+   CORS_ORIGINS=https://mining-ledger.vercel.app
+   DB_HOST=gateway01.<region>.prod.aws.tidbcloud.com
+   DB_PORT=4000
+   DB_USER=<prefix>.root
+   DB_PASSWORD=<password>
+   DB_NAME=mining_ledger
+   DB_SSL=true
+   AUTO_MIGRATE=1
+   ```
+   Or instead of the discrete `DB_*` vars, set a single `DATABASE_URL=mysql://<user>:<password>@<host>:4000/<db>?sslaccept=strict`.
+5. Deploy. Verify with `GET https://your-api.onrender.com/api/health` → `{ ok: true, db: "up" }`.
 
 ## TiDB Cloud setup
 

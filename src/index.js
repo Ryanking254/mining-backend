@@ -12,7 +12,10 @@ import capital from './routes/capital.js';
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
 
-const allowed = String(process.env.CORS_ORIGINS || 'http://localhost:5173')
+const allowed = String(
+  process.env.CORS_ORIGINS ||
+    'http://localhost:5173,http://localhost:4173,https://mining-ledger.vercel.app'
+)
   .split(',')
   .map((s) => s.trim())
   .filter(Boolean);
