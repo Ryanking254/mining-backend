@@ -194,16 +194,17 @@ router.get(
  * Single batch (partial allowed):
  *   { batchId, gramsSold, sellingPricePerGram, saleDate?,
  *     purityPercentage? | percentage? | purity? }
- * Combined multi-batch sale (sells the FULL remaining weight of each batch,
- * totals are summed and the sale math continues from there):
- *   { batchIds: [id, id, ...], sellingPricePerGram, saleDate?,
+ * Combined multi-batch sale (whole batches combined, then cleaned):
+ *   { batchIds: [id, id, ...], gramsSold, sellingPricePerGram, saleDate?,
  *     purityPercentage? | percentage? | purity? }
  *  - gramsSold = NEW weight after burning / impurity removal.
  *  - purityPercentage = assay % after impurity removal, 0–100 (default 100).
  *  - sellingPricePerGram = market price per gram.
  * Final amount: total = weight × (purity / 100) × market price.
  * Single: stock deducted = gramsSold; cost = gramsSold × batch cost.
- * Multi: stock deducted = full remaining per batch; cost = Σ (remaining × cost).
+ * Multi: stock deducted = full remaining per batch (batches close);
+ *   grams_taken = combined raw weight, grams_sold = new weighed weight,
+ *   cost = Σ (remaining × cost).
  */
 router.post(
   '/',
@@ -256,15 +257,23 @@ router.post(
       }
 
       let takes; // grams taken from each batch, in selection order
+      let takenTotal; // raw combined weight removed from stock
+      let soldTotal; // new weight after impurity removal (priced weight)
       if (ids.length > 1) {
-        // Combined sale: full remaining weight of every selected batch.
-        if (gramsSold !== undefined && gramsSold !== '' && gramsSold !== null) {
-          await conn.rollback();
-          throw badRequest(
-            'Multi-batch sales use the full remaining weight of each batch — clear the weight field or select a single batch for a partial sale'
-          );
-        }
+        // Combined sale: whole batches are consumed (closed), but the priced
+        // weight is the new weight weighed after impurity removal.
         takes = batches.map((b) => Number(b.grams_remaining));
+        takenTotal = takes.reduce((a, t) => a + t, 0);
+        const sold = Number(gramsSold);
+        if (!Number.isFinite(sold) || sold <= 0) {
+          await conn.rollback();
+          throw badRequest('Enter the new weight after removing impurities');
+        }
+        if (sold > takenTotal + 1e-9) {
+          await conn.rollback();
+          throw badRequest(`New weight exceeds combined stock (${takenTotal}g total)`);
+        }
+        soldTotal = sold;
       } else {
         const sold = Number(gramsSold);
         if (!Number.isFinite(sold) || sold <= 0) {
@@ -277,9 +286,10 @@ router.post(
           throw badRequest(`Only ${remaining}g remaining in ${batches[0].batch_number}`);
         }
         takes = [sold];
+        takenTotal = sold;
+        soldTotal = sold;
       }
 
-      const soldTotal = takes.reduce((a, t) => a + t, 0);
       const costBasis = takes.reduce((a, t, i) => a + t * Number(batches[i].price_per_gram), 0);
       const payable = (soldTotal * purity) / 100;
       const total = payable * ppg;
@@ -289,7 +299,7 @@ router.post(
       const [result] = await conn.query(
         `INSERT INTO sales (user_id, batch_id, grams_taken, grams_sold, purity_pct, selling_price_per_gram, total_selling_price, cost_basis, profit_loss, sale_date)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [req.user.id, batches[0].id, soldTotal, soldTotal, purity, ppg, total, costBasis, profitLoss, date]
+        [req.user.id, batches[0].id, takenTotal, soldTotal, purity, ppg, total, costBasis, profitLoss, date]
       );
       await conn.query('INSERT INTO sale_batches (sale_id, batch_id, grams_sold, cost_basis) VALUES ?', [
         takes.map((t, i) => [result.insertId, batches[i].id, t, t * Number(batches[i].price_per_gram)]),
