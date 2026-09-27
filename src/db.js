@@ -97,6 +97,7 @@ export async function migrate() {
       batch_id INT NOT NULL,
       grams_taken DECIMAL(12,2) NULL,
       grams_sold DECIMAL(12,2) NOT NULL,
+      purity_pct DECIMAL(5,2) NULL,
       selling_price_per_gram DECIMAL(12,2) NOT NULL,
       total_selling_price DECIMAL(14,2) NOT NULL,
       cost_basis DECIMAL(14,2) NOT NULL,
@@ -208,6 +209,17 @@ export async function migrate() {
     if (existing.length === 0) {
       await pool.query(`ALTER TABLE sales ADD COLUMN grams_taken DECIMAL(12,2) NULL AFTER batch_id`);
       await pool.query(`UPDATE sales SET grams_taken = grams_sold WHERE grams_taken IS NULL`);
+    }
+  } catch {
+    /* ignore — best effort */
+  }
+  // Sales purity: assay percentage after impurity removal (default 100 = pure).
+  // Final amount = new weight × (purity / 100) × market price per gram.
+  try {
+    const [existing] = await pool.query(`SHOW COLUMNS FROM sales LIKE 'purity_pct'`);
+    if (existing.length === 0) {
+      await pool.query(`ALTER TABLE sales ADD COLUMN purity_pct DECIMAL(5,2) NULL AFTER grams_sold`);
+      await pool.query(`UPDATE sales SET purity_pct = 100 WHERE purity_pct IS NULL`);
     }
   } catch {
     /* ignore — best effort */

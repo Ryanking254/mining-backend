@@ -82,10 +82,15 @@ export const mapBatch = (r) => ({
 
 export const mapSale = (r) => {
   const gramsSold = Number(r.grams_sold);
-  // grams_taken = raw weight removed from the batch before burning.
-  // Older rows predate the column -> fall back to grams_sold (no burn loss).
+  // grams_taken = raw weight removed from the batch (legacy burn field).
+  // Rows that predate it fall back to grams_sold.
   const gramsTaken = r.grams_taken != null ? Number(r.grams_taken) : gramsSold;
   const burnLoss = gramsTaken - gramsSold;
+  // purity_pct = assay percentage after impurity removal (default 100).
+  // total = grams_sold × (purity / 100) × market price per gram.
+  const purity = r.purity_pct != null ? Number(r.purity_pct) : 100;
+  const purityPercentage = Number.isFinite(purity) ? purity : 100;
+  const payableGrams = (gramsSold * purityPercentage) / 100;
   return {
     id: r.id,
     batchId: r.batch_id,
@@ -96,6 +101,9 @@ export const mapSale = (r) => {
     gramsBeforeBurn: gramsTaken,
     gramsAfterBurn: gramsSold,
     burnLoss: Number.isFinite(burnLoss) ? burnLoss : 0,
+    purityPercentage,
+    percentage: purityPercentage,
+    payableGrams: Number.isFinite(payableGrams) ? payableGrams : gramsSold,
     sellingPricePerGram: Number(r.selling_price_per_gram),
     totalSellingPrice: Number(r.total_selling_price),
     costBasis: Number(r.cost_basis ?? 0),

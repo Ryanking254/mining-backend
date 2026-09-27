@@ -43,11 +43,12 @@ CREATE TABLE IF NOT EXISTS sales (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NULL,
   batch_id INT NOT NULL,
-  -- Burn handling: grams_taken = raw weight removed from the batch BEFORE
-  -- burning off impurities; grams_sold = refined weight AFTER burning (what
-  -- the buyer actually pays for). Stock deducted = grams_taken.
+  -- Burn handling: grams_taken = raw weight removed from the batch (legacy);
+  -- grams_sold = NEW weight after burning / impurity removal.
+  -- purity_pct = assay % after impurity removal; total = weight × % × price.
   grams_taken DECIMAL(12, 2) NULL,
   grams_sold DECIMAL(12, 2) NOT NULL,
+  purity_pct DECIMAL(5, 2) NULL,
   selling_price_per_gram DECIMAL(12, 2) NOT NULL,
   total_selling_price DECIMAL(14, 2) NOT NULL,
   cost_basis DECIMAL(14, 2) NOT NULL,

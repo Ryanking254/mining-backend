@@ -81,7 +81,7 @@ All data endpoints require `Authorization: Bearer <token>`. Get a token via `/ap
 | GET | `/api/sales` | — | includes `batchNumber`, `totalSellingPrice`, `profitLoss` |
 | GET | `/api/sales/summary?range=daily\|weekly\|monthly` | — | `[{ period, revenue, profit }]` for charts |
 | GET | `/api/sales/export` | — | downloads `sales.xlsx` |
-| POST | `/api/sales` | `{ batchId, gramsSold, sellingPricePerGram, saleDate?, gramsTaken? }` | `gramsSold` = weight AFTER burn, `gramsTaken` = raw weight removed BEFORE burn (defaults to `gramsSold`); validates stock, closes batch at 0g |
+| POST | `/api/sales` | `{ batchId, gramsSold, purityPercentage?, sellingPricePerGram, saleDate? }` | `gramsSold` = new weight after burn, `purityPercentage` = 0–100 (default 100); total = weight × % × market price; validates stock, closes batch at 0g |
 | GET | `/api/loans` | — | per-account |
 | POST | `/api/loans` | `{ borrowerName, amountGiven, dateGiven?, notes? }` | |
 | PATCH | `/api/loans/:id/repay` | `{ amount }` | rejects overpayment, sets `REPAID` |

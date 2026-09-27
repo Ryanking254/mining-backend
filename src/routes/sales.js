@@ -115,9 +115,9 @@ router.get(
       { header: 'ID', key: 'id', width: 8 },
       { header: 'Batch', key: 'batch', width: 14 },
       { header: 'Item', key: 'item', width: 22 },
-      { header: 'Taken (g, before burn)', key: 'taken', width: 20 },
-      { header: 'Sold (g, after burn)', key: 'grams', width: 20 },
-      { header: 'Burn loss (g)', key: 'loss', width: 14 },
+      { header: 'Weight (g)', key: 'grams', width: 13 },
+      { header: 'Purity %', key: 'purity', width: 10 },
+      { header: 'Payable (g)', key: 'payable', width: 13 },
       { header: 'Price / g (KES)', key: 'ppg', width: 16 },
       { header: 'Total (KES)', key: 'total', width: 15 },
       { header: 'Profit / Loss (KES)', key: 'pl', width: 19 },
@@ -125,15 +125,15 @@ router.get(
     ];
     ws.getRow(1).font = { bold: true };
     for (const r of rows) {
-      const taken = r.grams_taken != null ? Number(r.grams_taken) : Number(r.grams_sold);
       const sold = Number(r.grams_sold);
+      const purity = r.purity_pct != null ? Number(r.purity_pct) : 100;
       ws.addRow({
         id: r.id,
         batch: r.batch_number,
         item: r.item_name,
-        taken,
         grams: sold,
-        loss: taken - sold,
+        purity,
+        payable: (sold * purity) / 100,
         ppg: Number(r.selling_price_per_gram),
         total: Number(r.total_selling_price),
         pl: Number(r.profit_loss),
@@ -153,33 +153,32 @@ router.get(
 /**
  * POST /api/sales
  * Body: { batchId, gramsSold, sellingPricePerGram, saleDate?,
- *         gramsTaken? | gramsBeforeBurn? | weightBeforeBurn? }
- *  - gramsSold  = refined weight AFTER burning (what the buyer pays for).
- *  - gramsTaken = raw weight removed from the batch BEFORE burning.
- *    Optional — defaults to gramsSold when nothing was burned off.
- * Validates remaining stock, computes totals + profit, decrements the batch atomically.
- * Stock deducted = gramsTaken (raw); revenue = gramsSold * price; cost = gramsTaken * batch cost.
+ *         purityPercentage? | percentage? | purity? }
+ *  - gramsSold = NEW weight after burning / impurity removal (from the batch).
+ *  - purityPercentage = assay % after impurity removal, 0–100 (default 100).
+ *  - sellingPricePerGram = market price per gram.
+ * Final amount: total = gramsSold × (purity / 100) × market price.
+ * Stock deducted from the batch = gramsSold; cost basis = gramsSold × batch cost.
  */
 router.post(
   '/',
   ah(async (req, res) => {
     const { batchId, gramsSold, sellingPricePerGram, saleDate } = req.body ?? {};
-    const rawTaken =
-      req.body?.gramsTaken ??
-      req.body?.gramsBeforeBurn ??
-      req.body?.weightBeforeBurn ??
-      req.body?.grams_before_burn;
+    const rawPurity =
+      req.body?.purityPercentage ??
+      req.body?.percentage ??
+      req.body?.purity ??
+      req.body?.purityPct ??
+      req.body?.purity_pct;
     const sold = Number(gramsSold);
-    const taken = rawTaken === undefined || rawTaken === '' || rawTaken === null ? sold : Number(rawTaken);
+    const purity = rawPurity === undefined || rawPurity === '' || rawPurity === null ? 100 : Number(rawPurity);
     const ppg = Number(sellingPricePerGram);
     if (!batchId) throw badRequest('batchId is required');
-    if (!Number.isFinite(sold) || sold <= 0) throw badRequest('gramsSold (weight after burn) must be a positive number');
-    if (!Number.isFinite(taken) || taken <= 0)
-      throw badRequest('weight before burn must be a positive number');
-    if (taken + 1e-9 < sold)
-      throw badRequest('weight after burn cannot exceed weight before burn');
+    if (!Number.isFinite(sold) || sold <= 0) throw badRequest('weight must be a positive number');
+    if (!Number.isFinite(purity) || purity <= 0 || purity > 100)
+      throw badRequest('percentage must be between 0 and 100');
     if (!Number.isFinite(ppg) || ppg < 0)
-      throw badRequest('sellingPricePerGram must be a non-negative number');
+      throw badRequest('market price per gram must be a non-negative number');
 
     const conn = await pool.getConnection();
     try {
@@ -198,22 +197,23 @@ router.post(
         await conn.rollback();
         throw badRequest('Batch is closed (no stock remaining)');
       }
-      if (taken > remaining + 1e-9) {
+      if (sold > remaining + 1e-9) {
         await conn.rollback();
         throw badRequest(`Only ${remaining}g remaining in ${batch.batch_number}`);
       }
 
-      const total = sold * ppg;
-      const costBasis = taken * Number(batch.price_per_gram);
+      const payable = (sold * purity) / 100;
+      const total = payable * ppg;
+      const costBasis = sold * Number(batch.price_per_gram);
       const profitLoss = total - costBasis;
       const date = saleDate || todayISO();
 
       const [result] = await conn.query(
-        `INSERT INTO sales (user_id, batch_id, grams_taken, grams_sold, selling_price_per_gram, total_selling_price, cost_basis, profit_loss, sale_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [req.user.id, batch.id, taken, sold, ppg, total, costBasis, profitLoss, date]
+        `INSERT INTO sales (user_id, batch_id, grams_taken, grams_sold, purity_pct, selling_price_per_gram, total_selling_price, cost_basis, profit_loss, sale_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.user.id, batch.id, sold, sold, purity, ppg, total, costBasis, profitLoss, date]
       );
-      const newRemaining = remaining - taken;
+      const newRemaining = remaining - sold;
       await conn.query('UPDATE batches SET grams_remaining = ?, status = ? WHERE id = ?', [
         newRemaining.toFixed(2),
         newRemaining <= 0.0001 ? 'CLOSED' : 'OPEN',
