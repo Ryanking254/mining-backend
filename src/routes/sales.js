@@ -82,7 +82,7 @@ router.get(
               SUM(s.profit_loss) AS profit
        FROM sales s
        ${where}
-       GROUP BY grp ORDER BY MIN(s.sale_date) ASC`,
+       GROUP BY grp, period ORDER BY MIN(s.sale_date) ASC`,
       params
     );
     res.json(

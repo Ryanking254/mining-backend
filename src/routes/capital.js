@@ -4,11 +4,72 @@ import { ah, badRequest, num } from '../utils.js';
 
 const router = Router();
 
+// Self-heal for DBs created before the capital tables / per-user columns
+// existed (e.g. Render never re-ran migrations). Best-effort: boot migrate()
+// is the real fixer; this just stops 500s when it didn't run.
+async function ensureCapitalSchema() {
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS capital_settings (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NULL UNIQUE,
+      starting_capital DECIMAL(14,2) NOT NULL DEFAULT 0,
+      updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+    )`);
+  } catch { /* ignore — boot migrate owns DDL */ }
+  try {
+    await pool.query(`CREATE TABLE IF NOT EXISTS capital_additions (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      amount DECIMAL(14,2) NOT NULL,
+      note VARCHAR(255) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      INDEX idx_capadd_user (user_id)
+    )`);
+  } catch { /* ignore */ }
+  try {
+    const [cols] = await pool.query(`SHOW COLUMNS FROM capital_settings LIKE 'user_id'`);
+    if (cols.length === 0) {
+      await pool.query(`ALTER TABLE capital_settings ADD COLUMN user_id INT NULL UNIQUE`);
+    }
+  } catch { /* ignore — will surface as a clear DB error below */ }
+}
+
 async function ensureCapitalRow(userId) {
-  await pool.query(
-    'INSERT IGNORE INTO capital_settings (user_id, starting_capital) VALUES (?, 0)',
-    [userId]
-  );
+  await ensureCapitalSchema();
+  try {
+    const [[existing]] = await pool.query(
+      'SELECT id FROM capital_settings WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    if (existing) return;
+  } catch (e) {
+    // Missing table/column and self-heal failed — let the caller surface it.
+    if (e?.code !== 'ER_NO_SUCH_TABLE' && e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
+    throw e;
+  }
+  try {
+    await pool.query(
+      'INSERT IGNORE INTO capital_settings (user_id, starting_capital) VALUES (?, 0)',
+      [userId]
+    );
+  } catch {
+    /* ignore — fallback below covers old single-row schemas */
+  }
+  // Old installs used `id INT PRIMARY KEY DEFAULT 1` (single global row, no
+  // AUTO_INCREMENT). The INSERT above then collides on id=1 instead of
+  // creating a per-user row — adopt the orphan row for this account.
+  try {
+    const [[row]] = await pool.query(
+      'SELECT id FROM capital_settings WHERE user_id = ? LIMIT 1',
+      [userId]
+    );
+    if (!row) {
+      await pool.query(
+        'UPDATE capital_settings SET user_id = ? WHERE user_id IS NULL LIMIT 1',
+        [userId]
+      );
+    }
+  } catch { /* ignore — snapshot queries will report the real problem */ }
 }
 
 async function capitalSnapshot(userId) {
@@ -111,10 +172,19 @@ router.put(
     const value = Number(raw);
     if (!Number.isFinite(value) || value < 0)
       throw badRequest('Provide a non-negative starting capital as `amount`');
-    await pool.query(
-      'INSERT INTO capital_settings (user_id, starting_capital) VALUES (?, ?) ON DUPLICATE KEY UPDATE starting_capital = ?',
-      [req.user.id, value, value]
+    await ensureCapitalRow(req.user.id);
+    // UPDATE-first works whether or not the UNIQUE(user_id) index survived
+    // the upgrade from the old single-row schema; INSERT covers races.
+    const [updated] = await pool.query(
+      'UPDATE capital_settings SET starting_capital = ? WHERE user_id = ?',
+      [value, req.user.id]
     );
+    if (updated?.affectedRows === 0) {
+      await pool.query(
+        'INSERT INTO capital_settings (user_id, starting_capital) VALUES (?, ?) ON DUPLICATE KEY UPDATE starting_capital = ?',
+        [req.user.id, value, value]
+      );
+    }
     res.json(await capitalSnapshot(req.user.id));
   })
 );
@@ -150,13 +220,21 @@ router.post(
 router.get(
   '/additions',
   ah(async (req, res) => {
-    const [rows] = await pool.query(
-      'SELECT id, amount, note, created_at AS createdAt FROM capital_additions WHERE user_id = ? ORDER BY id DESC',
-      [req.user.id]
-    );
-    res.json(
-      rows.map((r) => ({ id: r.id, amount: Number(r.amount), note: r.note, createdAt: r.createdAt }))
-    );
+    await ensureCapitalSchema();
+    try {
+      const [rows] = await pool.query(
+        'SELECT id, amount, note, created_at AS createdAt FROM capital_additions WHERE user_id = ? ORDER BY id DESC',
+        [req.user.id]
+      );
+      res.json(
+        rows.map((r) => ({ id: r.id, amount: Number(r.amount), note: r.note, createdAt: r.createdAt }))
+      );
+    } catch (e) {
+      // Table created before capital_additions existed + migrate never ran:
+      // empty history is more useful than a 500 on the dashboard.
+      if (e?.code === 'ER_NO_SUCH_TABLE') return res.json([]);
+      throw e;
+    }
   })
 );
 
