@@ -91,10 +91,27 @@ export const mapSale = (r) => {
   const purity = r.purity_pct != null ? Number(r.purity_pct) : 100;
   const purityPercentage = Number.isFinite(purity) ? purity : 100;
   const payableGrams = (gramsSold * purityPercentage) / 100;
+  // Multi-batch sales: attached by attachSaleBatches() as arrays; legacy and
+  // single-batch rows fall back to the primary batch columns.
+  const batchIds =
+    Array.isArray(r.batch_ids) && r.batch_ids.length > 0
+      ? r.batch_ids.map(Number)
+      : r.batch_id != null
+        ? [Number(r.batch_id)]
+        : [];
+  const batchNumbers =
+    Array.isArray(r.batch_numbers) && r.batch_numbers.length > 0
+      ? r.batch_numbers
+      : r.batch_number != null
+        ? [r.batch_number]
+        : [];
   return {
     id: r.id,
-    batchId: r.batch_id,
-    batchNumber: r.batch_number ?? null,
+    batchId: batchIds[0] ?? r.batch_id,
+    batchNumber: batchNumbers[0] ?? r.batch_number ?? null,
+    batchIds,
+    batchNumbers,
+    batchCount: batchIds.length > 0 ? batchIds.length : 1,
     gramsTaken,
     gramsSold,
     // Back-compat aliases the old frontend expects.

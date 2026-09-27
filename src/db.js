@@ -173,6 +173,20 @@ export async function migrate() {
       INDEX idx_capadd_user (user_id),
       CONSTRAINT fk_capadd_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
     )`,
+    // One row per batch consumed by a sale. Single-batch sales have 1 row;
+    // combined multi-batch sales have N rows. sales.batch_id stays NOT NULL
+    // as the primary (first) batch so legacy queries keep working.
+    `CREATE TABLE IF NOT EXISTS sale_batches (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      sale_id INT NOT NULL,
+      batch_id INT NOT NULL,
+      grams_sold DECIMAL(12,2) NOT NULL,
+      cost_basis DECIMAL(14,2) NOT NULL,
+      CONSTRAINT fk_sb_sale FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
+      CONSTRAINT fk_sb_batch FOREIGN KEY (batch_id) REFERENCES batches (id),
+      INDEX idx_sb_sale (sale_id),
+      INDEX idx_sb_batch (batch_id)
+    )`,
   ];
   for (const sql of ddl) {
     await pool.query(sql);
@@ -223,6 +237,17 @@ export async function migrate() {
     }
   } catch {
     /* ignore — best effort */
+  }
+  // Multi-batch sales: one sale_batches row per batch consumed. Backfill
+  // legacy single-batch sales so every sale has exactly its rows.
+  try {
+    await pool.query(
+      `INSERT INTO sale_batches (sale_id, batch_id, grams_sold, cost_basis)
+       SELECT s.id, s.batch_id, s.grams_sold, s.cost_basis FROM sales s
+       WHERE s.id NOT IN (SELECT sale_id FROM sale_batches)`
+    );
+  } catch {
+    /* ignore — best effort (empty sales table or FK state) */
   }
   // Attribute orphan ledger rows to the earliest user (keeps old data visible
   // to its owner instead of vanishing once queries are user-scoped).

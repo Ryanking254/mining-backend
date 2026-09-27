@@ -62,6 +62,20 @@ CREATE TABLE IF NOT EXISTS sales (
   INDEX idx_sales_date (sale_date)
 );
 
+-- One row per batch consumed by a sale (multi-batch sales).
+-- sales.batch_id stays the primary (first) batch for backwards compatibility.
+CREATE TABLE IF NOT EXISTS sale_batches (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  sale_id INT NOT NULL,
+  batch_id INT NOT NULL,
+  grams_sold DECIMAL(12, 2) NOT NULL,
+  cost_basis DECIMAL(14, 2) NOT NULL,
+  CONSTRAINT fk_sb_sale FOREIGN KEY (sale_id) REFERENCES sales (id) ON DELETE CASCADE,
+  CONSTRAINT fk_sb_batch FOREIGN KEY (batch_id) REFERENCES batches (id),
+  INDEX idx_sb_sale (sale_id),
+  INDEX idx_sb_batch (batch_id)
+);
+
 CREATE TABLE IF NOT EXISTS loans (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NULL,
