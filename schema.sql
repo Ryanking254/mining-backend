@@ -1,9 +1,28 @@
 -- Mining ledger schema — MySQL / TiDB Cloud compatible
 -- Run manually if you prefer: mysql < schema.sql
 -- (The server also auto-creates these tables on boot via CREATE TABLE IF NOT EXISTS.)
+--
+-- Isolation rule: EVERY ledger row belongs to exactly one account via user_id.
+-- All data endpoints filter by the signed-in user's id, so one account can
+-- never see another account's batches, sales, loans, expenses or withdrawals.
+
+CREATE TABLE IF NOT EXISTS users (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  name VARCHAR(255) NOT NULL,
+  email VARCHAR(255) NOT NULL UNIQUE,
+  password_hash VARCHAR(255) NULL,
+  google_id VARCHAR(255) NULL UNIQUE,
+  avatar_url TEXT NULL,
+  twofa_secret VARCHAR(255) NULL,
+  twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
+  twofa_backup_codes TEXT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_users_email (email)
+);
 
 CREATE TABLE IF NOT EXISTS batches (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL,
   batch_number VARCHAR(32) NOT NULL UNIQUE,
   item_name VARCHAR(255) NOT NULL,
   grams_bought DECIMAL(12, 2) NOT NULL,
@@ -14,13 +33,20 @@ CREATE TABLE IF NOT EXISTS batches (
   status ENUM('OPEN', 'CLOSED') NOT NULL DEFAULT 'OPEN',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+  INDEX idx_batches_user (user_id),
   INDEX idx_batches_status (status),
-  INDEX idx_batches_purchase_date (purchase_date)
+  INDEX idx_batches_purchase_date (purchase_date),
+  CONSTRAINT fk_batches_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS sales (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL,
   batch_id INT NOT NULL,
+  -- Burn handling: grams_taken = raw weight removed from the batch BEFORE
+  -- burning off impurities; grams_sold = refined weight AFTER burning (what
+  -- the buyer actually pays for). Stock deducted = grams_taken.
+  grams_taken DECIMAL(12, 2) NULL,
   grams_sold DECIMAL(12, 2) NOT NULL,
   selling_price_per_gram DECIMAL(12, 2) NOT NULL,
   total_selling_price DECIMAL(14, 2) NOT NULL,
@@ -29,12 +55,15 @@ CREATE TABLE IF NOT EXISTS sales (
   sale_date DATE NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   CONSTRAINT fk_sales_batch FOREIGN KEY (batch_id) REFERENCES batches (id),
+  CONSTRAINT fk_sales_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE,
+  INDEX idx_sales_user (user_id),
   INDEX idx_sales_batch (batch_id),
   INDEX idx_sales_date (sale_date)
 );
 
 CREATE TABLE IF NOT EXISTS loans (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL,
   borrower_name VARCHAR(255) NOT NULL,
   amount_given DECIMAL(14, 2) NOT NULL,
   amount_repaid DECIMAL(14, 2) NOT NULL DEFAULT 0,
@@ -43,7 +72,9 @@ CREATE TABLE IF NOT EXISTS loans (
   status ENUM('OPEN', 'PARTIAL', 'REPAID') NOT NULL DEFAULT 'OPEN',
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  INDEX idx_loans_status (status)
+  INDEX idx_loans_user (user_id),
+  INDEX idx_loans_status (status),
+  CONSTRAINT fk_loans_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS loan_repayments (
@@ -57,46 +88,47 @@ CREATE TABLE IF NOT EXISTS loan_repayments (
 
 CREATE TABLE IF NOT EXISTS expenditures (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL,
   amount DECIMAL(14, 2) NOT NULL,
   category VARCHAR(128) NOT NULL,
   description TEXT NULL,
   expense_date DATE NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  INDEX idx_exp_user (user_id),
   INDEX idx_exp_date (expense_date),
-  INDEX idx_exp_category (category)
+  INDEX idx_exp_category (category),
+  CONSTRAINT fk_exp_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS withdrawals (
   id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL,
   amount DECIMAL(14, 2) NOT NULL,
   reason VARCHAR(255) NULL,
   withdrawal_date DATE NOT NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_wd_date (withdrawal_date)
+  INDEX idx_wd_user (user_id),
+  INDEX idx_wd_date (withdrawal_date),
+  CONSTRAINT fk_wd_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
--- Single-row table holding the owner's starting capital.
+-- One row per account holding that account's starting capital.
 CREATE TABLE IF NOT EXISTS capital_settings (
-  id INT PRIMARY KEY DEFAULT 1,
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NULL UNIQUE,
   starting_capital DECIMAL(14, 2) NOT NULL DEFAULT 0,
   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-  CONSTRAINT chk_capital_single CHECK (id = 1)
+  CONSTRAINT fk_capital_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
-INSERT IGNORE INTO capital_settings (id, starting_capital) VALUES (1, 0);
-
--- Users: password login + Google OAuth + TOTP 2FA (Google Authenticator compatible).
--- password_hash is NULL for Google-only accounts; google_id links the Google identity.
-CREATE TABLE IF NOT EXISTS users (
+-- Manual top-ups to the current capital (extra cash injected). Auditable history;
+-- GET /api/capital adds SUM(amount) to the starting capital.
+CREATE TABLE IF NOT EXISTS capital_additions (
   id INT AUTO_INCREMENT PRIMARY KEY,
-  name VARCHAR(255) NOT NULL,
-  email VARCHAR(255) NOT NULL UNIQUE,
-  password_hash VARCHAR(255) NULL,
-  google_id VARCHAR(255) NULL UNIQUE,
-  avatar_url TEXT NULL,
-  twofa_secret VARCHAR(255) NULL,
-  twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
-  twofa_backup_codes TEXT NULL,
+  user_id INT NOT NULL,
+  amount DECIMAL(14, 2) NOT NULL,
+  note VARCHAR(255) NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  INDEX idx_users_email (email)
+  INDEX idx_capadd_user (user_id),
+  CONSTRAINT fk_capadd_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );

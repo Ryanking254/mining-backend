@@ -7,15 +7,20 @@ const router = Router();
 /**
  * GET /api/batches?status=OPEN
  * Returns newest first. Frontend uses `status` filter for the sale form.
+ * Scoped to the signed-in account (each user only sees their own batches).
  */
 router.get(
   '/',
   ah(async (req, res) => {
     const { status } = req.query;
-    const where = status ? 'WHERE status = ?' : '';
-    const params = status ? [String(status).toUpperCase()] : [];
+    const where = ['user_id = ?'];
+    const params = [req.user.id];
+    if (status) {
+      where.push('status = ?');
+      params.push(String(status).toUpperCase());
+    }
     const [rows] = await pool.query(
-      `SELECT * FROM batches ${where} ORDER BY created_at DESC, id DESC`,
+      `SELECT * FROM batches WHERE ${where.join(' AND ')} ORDER BY created_at DESC, id DESC`,
       params
     );
     res.json(rows.map(mapBatch));
@@ -26,7 +31,7 @@ router.get(
 router.get(
   '/:id',
   ah(async (req, res) => {
-    const [rows] = await pool.query('SELECT * FROM batches WHERE id = ?', [req.params.id]);
+    const [rows] = await pool.query('SELECT * FROM batches WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
     if (rows.length === 0) throw notFound('Batch not found');
     res.json(mapBatch(rows[0]));
   })
@@ -55,9 +60,9 @@ router.post(
     try {
       await conn.beginTransaction();
       const [result] = await conn.query(
-        `INSERT INTO batches (batch_number, item_name, grams_bought, grams_remaining, price_per_gram, total_cost, purchase_date, status)
-         VALUES ('PENDING', ?, ?, ?, ?, ?, ?, 'OPEN')`,
-        [String(itemName).trim(), grams, grams, ppg, totalCost, date]
+        `INSERT INTO batches (user_id, batch_number, item_name, grams_bought, grams_remaining, price_per_gram, total_cost, purchase_date, status)
+         VALUES (?, 'PENDING', ?, ?, ?, ?, ?, ?, 'OPEN')`,
+        [req.user.id, String(itemName).trim(), grams, grams, ppg, totalCost, date]
       );
       const id = result.insertId;
       const batchNumber = `B-${100 + id}`;

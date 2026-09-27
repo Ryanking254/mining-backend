@@ -80,17 +80,30 @@ export const mapBatch = (r) => ({
   createdAt: r.created_at,
 });
 
-export const mapSale = (r) => ({
-  id: r.id,
-  batchId: r.batch_id,
-  batchNumber: r.batch_number ?? null,
-  gramsSold: Number(r.grams_sold),
-  sellingPricePerGram: Number(r.selling_price_per_gram),
-  totalSellingPrice: Number(r.total_selling_price),
-  profitLoss: Number(r.profit_loss),
-  saleDate: r.sale_date,
-  createdAt: r.created_at,
-});
+export const mapSale = (r) => {
+  const gramsSold = Number(r.grams_sold);
+  // grams_taken = raw weight removed from the batch before burning.
+  // Older rows predate the column -> fall back to grams_sold (no burn loss).
+  const gramsTaken = r.grams_taken != null ? Number(r.grams_taken) : gramsSold;
+  const burnLoss = gramsTaken - gramsSold;
+  return {
+    id: r.id,
+    batchId: r.batch_id,
+    batchNumber: r.batch_number ?? null,
+    gramsTaken,
+    gramsSold,
+    // Back-compat aliases the old frontend expects.
+    gramsBeforeBurn: gramsTaken,
+    gramsAfterBurn: gramsSold,
+    burnLoss: Number.isFinite(burnLoss) ? burnLoss : 0,
+    sellingPricePerGram: Number(r.selling_price_per_gram),
+    totalSellingPrice: Number(r.total_selling_price),
+    costBasis: Number(r.cost_basis ?? 0),
+    profitLoss: Number(r.profit_loss),
+    saleDate: r.sale_date,
+    createdAt: r.created_at,
+  };
+};
 
 export const mapLoan = (r) => ({
   id: r.id,

@@ -72,7 +72,7 @@ All data endpoints require `Authorization: Bearer <token>`. Get a token via `/ap
 
 | Method | Path | Body | Notes |
 |---|---|---|---|
-| POST | `/api/auth/register` | `{ name, email, password }` | min 6-char password, returns `{ user, token }` |
+| POST | `/api/auth/register` | `{ name, email, password, startingCapital? }` | min 6-char password, optional opening balance, returns `{ user, token }` |
 | POST | `/api/auth/login` | `{ email, password }` | returns `{ user, token }` |
 | GET | `/api/auth/me` | — | requires token |
 | GET | `/api/batches?status=OPEN` | — | newest first, requires token |
@@ -81,23 +81,25 @@ All data endpoints require `Authorization: Bearer <token>`. Get a token via `/ap
 | GET | `/api/sales` | — | includes `batchNumber`, `totalSellingPrice`, `profitLoss` |
 | GET | `/api/sales/summary?range=daily\|weekly\|monthly` | — | `[{ period, revenue, profit }]` for charts |
 | GET | `/api/sales/export` | — | downloads `sales.xlsx` |
-| POST | `/api/sales` | `{ batchId, gramsSold, sellingPricePerGram, saleDate? }` | validates stock, closes batch at 0g |
-| GET | `/api/loans` | — | |
+| POST | `/api/sales` | `{ batchId, gramsSold, sellingPricePerGram, saleDate?, gramsTaken? }` | `gramsSold` = weight AFTER burn, `gramsTaken` = raw weight removed BEFORE burn (defaults to `gramsSold`); validates stock, closes batch at 0g |
+| GET | `/api/loans` | — | per-account |
 | POST | `/api/loans` | `{ borrowerName, amountGiven, dateGiven?, notes? }` | |
 | PATCH | `/api/loans/:id/repay` | `{ amount }` | rejects overpayment, sets `REPAID` |
 | GET | `/api/expenditures` | — | |
 | POST | `/api/expenditures` | `{ amount, category, description?, expenseDate? }` | |
 | GET | `/api/withdrawals` | — | |
 | POST | `/api/withdrawals` | `{ amount, reason?, withdrawalDate? }` | |
-| GET | `/api/capital` | — | `{ currentCapital, total, breakdown{…} }` |
-| PUT | `/api/capital/starting` | `{ amount }` | also accepts `startingCapital` |
+| GET | `/api/capital` | — | per-account `{ currentCapital, total, startingCapital, manualAdditions, breakdown{…} }` |
+| PUT | `/api/capital/starting` | `{ amount }` | sets this account's starting capital; also accepts `startingCapital` |
+| POST | `/api/capital/add` | `{ amount, note? }` | manually top up current capital (tracked in history) |
+| GET | `/api/capital/additions` | — | manual top-up history for this account |
 
 Error shape: `{ error: "message" }` with 400 for validation, 404 for missing rows.
 
-## Capital math
+## Capital math (per account)
 
 ```
-current = starting + salesRevenue − stockPurchases − expenditures − withdrawals − loansOutstanding
+current = starting + manualTopUps + salesRevenue − stockPurchases − expenditures − withdrawals − loansOutstanding
 ```
 
 `GET /api/capital` returns the parts plus `total` (alias the dashboard falls back to) and `breakdown`.

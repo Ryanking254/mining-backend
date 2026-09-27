@@ -61,7 +61,9 @@ function parseBackupHashes(row) {
 
 /**
  * POST /api/auth/register
- * Body: { name, email, password }
+ * Body: { name, email, password, startingCapital? }
+ * `startingCapital` (optional, >= 0) seeds this account's starting capital so
+ * a new user can declare their opening balance during signup.
  * First registered user becomes the admin; subsequent registrations are allowed
  * (single-tenant ledger — gate with ALLOW_PUBLIC_REGISTER=false to disable).
  */
@@ -69,11 +71,20 @@ router.post(
   '/register',
   ah(async (req, res) => {
     const { name, email, password } = req.body ?? {};
+    const rawStarting =
+      req.body?.startingCapital ?? req.body?.starting_capital ?? req.body?.startingAmount;
 
     if (!name || String(name).trim() === '') throw badRequest('name is required');
     if (!validateEmail(email)) throw badRequest('valid email is required');
     if (typeof password !== 'string' || password.length < 6) {
       throw badRequest('password must be at least 6 characters');
+    }
+    let startingCapital = 0;
+    if (rawStarting !== undefined && rawStarting !== '' && rawStarting !== null) {
+      startingCapital = Number(rawStarting);
+      if (!Number.isFinite(startingCapital) || startingCapital < 0) {
+        throw badRequest('startingCapital must be a non-negative number');
+      }
     }
 
     const allowPublic =
@@ -96,6 +107,15 @@ router.post(
       'INSERT INTO users (name, email, password_hash) VALUES (?, ?, ?)',
       [String(name).trim(), normalizedEmail, passwordHash]
     );
+    // Each account owns its ledger + capital. Seed the starting capital given at signup.
+    try {
+      await pool.query(
+        'INSERT INTO capital_settings (user_id, starting_capital) VALUES (?, ?) ON DUPLICATE KEY UPDATE starting_capital = ?',
+        [result.insertId, startingCapital, startingCapital]
+      );
+    } catch {
+      /* ignore — capital endpoints lazily create the row */
+    }
     const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [result.insertId]);
     const user = mapUser(rows[0]);
     res.status(201).json({ user, token: signToken(user) });
@@ -198,6 +218,22 @@ router.post(
       );
       const [created] = await pool.query('SELECT * FROM users WHERE id = ?', [result.insertId]);
       row = created[0];
+      // Seed per-account capital for brand-new Google accounts (lazy default 0
+      // unless the client supplied an opening balance).
+      try {
+        const rawStarting = req.body?.startingCapital ?? req.body?.starting_capital;
+        const startVal =
+          rawStarting !== undefined && rawStarting !== '' && rawStarting !== null
+            ? Number(rawStarting)
+            : 0;
+        const safeStart = Number.isFinite(startVal) && startVal >= 0 ? startVal : 0;
+        await pool.query('INSERT IGNORE INTO capital_settings (user_id, starting_capital) VALUES (?, ?)', [
+          row.id,
+          safeStart,
+        ]);
+      } catch {
+        /* ignore */
+      }
     } else if (avatar && !row.avatar_url) {
       await pool.query('UPDATE users SET avatar_url = ? WHERE id = ?', [avatar, row.id]);
       row.avatar_url = avatar;

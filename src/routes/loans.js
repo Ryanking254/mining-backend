@@ -10,11 +10,14 @@ function statusFor(given, repaid) {
   return 'OPEN';
 }
 
-/** GET /api/loans — newest first. */
+/** GET /api/loans — newest first. Scoped to the signed-in account. */
 router.get(
   '/',
   ah(async (req, res) => {
-    const [rows] = await pool.query('SELECT * FROM loans ORDER BY created_at DESC, id DESC');
+    const [rows] = await pool.query(
+      'SELECT * FROM loans WHERE user_id = ? ORDER BY created_at DESC, id DESC',
+      [req.user.id]
+    );
     res.json(rows.map(mapLoan));
   })
 );
@@ -31,11 +34,11 @@ router.post(
       throw badRequest('amountGiven must be a positive number');
 
     const [result] = await pool.query(
-      `INSERT INTO loans (borrower_name, amount_given, amount_repaid, date_given, notes, status)
-       VALUES (?, ?, 0, ?, ?, 'OPEN')`,
-      [String(borrowerName).trim(), amount, dateGiven || todayISO(), notes || null]
+      `INSERT INTO loans (user_id, borrower_name, amount_given, amount_repaid, date_given, notes, status)
+       VALUES (?, ?, ?, 0, ?, ?, 'OPEN')`,
+      [req.user.id, String(borrowerName).trim(), amount, dateGiven || todayISO(), notes || null]
     );
-    const [rows] = await pool.query('SELECT * FROM loans WHERE id = ?', [result.insertId]);
+    const [rows] = await pool.query('SELECT * FROM loans WHERE id = ? AND user_id = ?', [result.insertId, req.user.id]);
     res.status(201).json(mapLoan(rows[0]));
   })
 );
@@ -53,7 +56,7 @@ router.patch(
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
-      const [rows] = await conn.query('SELECT * FROM loans WHERE id = ? FOR UPDATE', [req.params.id]);
+      const [rows] = await conn.query('SELECT * FROM loans WHERE id = ? AND user_id = ? FOR UPDATE', [req.params.id, req.user.id]);
       if (rows.length === 0) {
         await conn.rollback();
         throw notFound('Loan not found');
@@ -77,7 +80,7 @@ router.patch(
         loan.id,
       ]);
       await conn.commit();
-      const [updated] = await pool.query('SELECT * FROM loans WHERE id = ?', [loan.id]);
+      const [updated] = await pool.query('SELECT * FROM loans WHERE id = ? AND user_id = ?', [loan.id, req.user.id]);
       res.json(mapLoan(updated[0]));
     } catch (e) {
       try {

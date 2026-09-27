@@ -8,6 +8,7 @@ const router = Router();
 /**
  * GET /api/sales — newest first.
  * Frontend renders: batchNumber, gramsSold, totalSellingPrice, profitLoss, saleDate.
+ * Scoped to the signed-in account.
  */
 router.get(
   '/',
@@ -15,7 +16,9 @@ router.get(
     const [rows] = await pool.query(
       `SELECT s.*, b.batch_number
        FROM sales s JOIN batches b ON b.id = s.batch_id
-       ORDER BY s.sale_date DESC, s.id DESC`
+       WHERE s.user_id = ?
+       ORDER BY s.sale_date DESC, s.id DESC`,
+      [req.user.id]
     );
     res.json(rows.map(mapSale));
   })
@@ -60,14 +63,17 @@ router.get(
       if (!isDate(from)) throw badRequest('from must be YYYY-MM-DD');
       if (!isDate(to)) throw badRequest('to must be YYYY-MM-DD');
       if (from > to) throw badRequest('from must be on or before to');
-      where = 'WHERE s.sale_date >= ? AND s.sale_date <= ?';
-      params = [from, to];
+      where = 'WHERE s.user_id = ? AND s.sale_date >= ? AND s.sale_date <= ?';
+      params = [req.user.id, from, to];
     } else if (bucket === 'daily') {
-      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)';
+      where = 'WHERE s.user_id = ? AND s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 30 DAY)';
+      params = [req.user.id];
     } else if (bucket === 'weekly') {
-      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 12 WEEK)';
+      where = 'WHERE s.user_id = ? AND s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 12 WEEK)';
+      params = [req.user.id];
     } else {
-      where = 'WHERE s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)';
+      where = 'WHERE s.user_id = ? AND s.sale_date >= DATE_SUB(CURDATE(), INTERVAL 6 MONTH)';
+      params = [req.user.id];
     }
 
     const [rows] = await pool.query(
@@ -98,7 +104,9 @@ router.get(
     const [rows] = await pool.query(
       `SELECT s.*, b.batch_number, b.item_name
        FROM sales s JOIN batches b ON b.id = s.batch_id
-       ORDER BY s.sale_date DESC, s.id DESC`
+       WHERE s.user_id = ?
+       ORDER BY s.sale_date DESC, s.id DESC`,
+      [req.user.id]
     );
     const wb = new ExcelJS.Workbook();
     wb.creator = 'Mining Ledger';
@@ -107,7 +115,9 @@ router.get(
       { header: 'ID', key: 'id', width: 8 },
       { header: 'Batch', key: 'batch', width: 14 },
       { header: 'Item', key: 'item', width: 22 },
-      { header: 'Grams sold', key: 'grams', width: 13 },
+      { header: 'Taken (g, before burn)', key: 'taken', width: 20 },
+      { header: 'Sold (g, after burn)', key: 'grams', width: 20 },
+      { header: 'Burn loss (g)', key: 'loss', width: 14 },
       { header: 'Price / g (KES)', key: 'ppg', width: 16 },
       { header: 'Total (KES)', key: 'total', width: 15 },
       { header: 'Profit / Loss (KES)', key: 'pl', width: 19 },
@@ -115,11 +125,15 @@ router.get(
     ];
     ws.getRow(1).font = { bold: true };
     for (const r of rows) {
+      const taken = r.grams_taken != null ? Number(r.grams_taken) : Number(r.grams_sold);
+      const sold = Number(r.grams_sold);
       ws.addRow({
         id: r.id,
         batch: r.batch_number,
         item: r.item_name,
-        grams: Number(r.grams_sold),
+        taken,
+        grams: sold,
+        loss: taken - sold,
         ppg: Number(r.selling_price_per_gram),
         total: Number(r.total_selling_price),
         pl: Number(r.profit_loss),
@@ -138,24 +152,42 @@ router.get(
 
 /**
  * POST /api/sales
- * Body: { batchId, gramsSold, sellingPricePerGram, saleDate? }
+ * Body: { batchId, gramsSold, sellingPricePerGram, saleDate?,
+ *         gramsTaken? | gramsBeforeBurn? | weightBeforeBurn? }
+ *  - gramsSold  = refined weight AFTER burning (what the buyer pays for).
+ *  - gramsTaken = raw weight removed from the batch BEFORE burning.
+ *    Optional — defaults to gramsSold when nothing was burned off.
  * Validates remaining stock, computes totals + profit, decrements the batch atomically.
+ * Stock deducted = gramsTaken (raw); revenue = gramsSold * price; cost = gramsTaken * batch cost.
  */
 router.post(
   '/',
   ah(async (req, res) => {
     const { batchId, gramsSold, sellingPricePerGram, saleDate } = req.body ?? {};
-    const grams = Number(gramsSold);
+    const rawTaken =
+      req.body?.gramsTaken ??
+      req.body?.gramsBeforeBurn ??
+      req.body?.weightBeforeBurn ??
+      req.body?.grams_before_burn;
+    const sold = Number(gramsSold);
+    const taken = rawTaken === undefined || rawTaken === '' || rawTaken === null ? sold : Number(rawTaken);
     const ppg = Number(sellingPricePerGram);
     if (!batchId) throw badRequest('batchId is required');
-    if (!Number.isFinite(grams) || grams <= 0) throw badRequest('gramsSold must be a positive number');
+    if (!Number.isFinite(sold) || sold <= 0) throw badRequest('gramsSold (weight after burn) must be a positive number');
+    if (!Number.isFinite(taken) || taken <= 0)
+      throw badRequest('weight before burn must be a positive number');
+    if (taken + 1e-9 < sold)
+      throw badRequest('weight after burn cannot exceed weight before burn');
     if (!Number.isFinite(ppg) || ppg < 0)
       throw badRequest('sellingPricePerGram must be a non-negative number');
 
     const conn = await pool.getConnection();
     try {
       await conn.beginTransaction();
-      const [batches] = await conn.query('SELECT * FROM batches WHERE id = ? FOR UPDATE', [batchId]);
+      const [batches] = await conn.query(
+        'SELECT * FROM batches WHERE id = ? AND user_id = ? FOR UPDATE',
+        [batchId, req.user.id]
+      );
       if (batches.length === 0) {
         await conn.rollback();
         throw badRequest('Batch not found');
@@ -166,22 +198,22 @@ router.post(
         await conn.rollback();
         throw badRequest('Batch is closed (no stock remaining)');
       }
-      if (grams > remaining + 1e-9) {
+      if (taken > remaining + 1e-9) {
         await conn.rollback();
         throw badRequest(`Only ${remaining}g remaining in ${batch.batch_number}`);
       }
 
-      const total = grams * ppg;
-      const costBasis = grams * Number(batch.price_per_gram);
+      const total = sold * ppg;
+      const costBasis = taken * Number(batch.price_per_gram);
       const profitLoss = total - costBasis;
       const date = saleDate || todayISO();
 
       const [result] = await conn.query(
-        `INSERT INTO sales (batch_id, grams_sold, selling_price_per_gram, total_selling_price, cost_basis, profit_loss, sale_date)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [batch.id, grams, ppg, total, costBasis, profitLoss, date]
+        `INSERT INTO sales (user_id, batch_id, grams_taken, grams_sold, selling_price_per_gram, total_selling_price, cost_basis, profit_loss, sale_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [req.user.id, batch.id, taken, sold, ppg, total, costBasis, profitLoss, date]
       );
-      const newRemaining = remaining - grams;
+      const newRemaining = remaining - taken;
       await conn.query('UPDATE batches SET grams_remaining = ?, status = ? WHERE id = ?', [
         newRemaining.toFixed(2),
         newRemaining <= 0.0001 ? 'CLOSED' : 'OPEN',
@@ -190,8 +222,8 @@ router.post(
       await conn.commit();
 
       const [rows] = await pool.query(
-        `SELECT s.*, b.batch_number FROM sales s JOIN batches b ON b.id = s.batch_id WHERE s.id = ?`,
-        [result.insertId]
+        `SELECT s.*, b.batch_number FROM sales s JOIN batches b ON b.id = s.batch_id WHERE s.id = ? AND s.user_id = ?`,
+        [result.insertId, req.user.id]
       );
       res.status(201).json(mapSale(rows[0]));
     } catch (e) {
