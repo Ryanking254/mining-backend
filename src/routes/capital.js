@@ -29,7 +29,19 @@ async function ensureCapitalSchema() {
   try {
     const [cols] = await pool.query(`SHOW COLUMNS FROM capital_settings LIKE 'user_id'`);
     if (cols.length === 0) {
-      await pool.query(`ALTER TABLE capital_settings ADD COLUMN user_id INT NULL UNIQUE`);
+      // Plain column first, UNIQUE second — single-statement ADD COLUMN ...
+      // UNIQUE failed silently on some TiDB setups, leaving user_id missing.
+      try {
+        await pool.query(`ALTER TABLE capital_settings ADD COLUMN user_id INT NULL`);
+      } catch (e) {
+        console.error('[capital] self-heal ADD COLUMN user_id failed:', e.message);
+        return;
+      }
+      try {
+        await pool.query(`ALTER TABLE capital_settings ADD UNIQUE INDEX uq_capital_user (user_id)`);
+      } catch (e) {
+        console.error('[capital] self-heal ADD UNIQUE(user_id) failed (non-fatal):', e.message);
+      }
     }
   } catch { /* ignore — will surface as a clear DB error below */ }
 }

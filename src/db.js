@@ -271,22 +271,37 @@ export async function migrate() {
   try {
     const [cols] = await pool.query(`SHOW COLUMNS FROM capital_settings LIKE 'user_id'`);
     if (cols.length === 0) {
-      await pool.query(`ALTER TABLE capital_settings ADD COLUMN user_id INT NULL UNIQUE`);
+      // Split in two: plain ADD COLUMN first (works everywhere), UNIQUE index
+      // second (best-effort — the app's UPDATE-first logic works without it).
+      // Previous single-statement `ADD COLUMN ... UNIQUE` failed silently on
+      // some TiDB/privilege setups, leaving user_id missing and every
+      // /api/capital call 500ing with "Unknown column 'user_id'".
+      try {
+        await pool.query(`ALTER TABLE capital_settings ADD COLUMN user_id INT NULL`);
+      } catch (e) {
+        console.error('[db] migrate warning: capital_settings ADD COLUMN user_id failed:', e.message);
+        throw e;
+      }
+      try {
+        await pool.query(`ALTER TABLE capital_settings ADD UNIQUE INDEX uq_capital_user (user_id)`);
+      } catch (e) {
+        console.error('[db] migrate warning: capital_settings ADD UNIQUE(user_id) failed (non-fatal):', e.message);
+      }
     }
-  } catch {
-    /* ignore */
+  } catch (e) {
+    console.error('[db] migrate warning: capital_settings user_id upgrade skipped:', e?.message);
   }
   try {
     await pool.query(`ALTER TABLE capital_settings DROP CHECK chk_capital_single`);
-  } catch {
+  } catch (e) {
     /* ignore — may not exist */
   }
   try {
     // Old installs used `id INT PRIMARY KEY DEFAULT 1` (single global row).
     // Switch to AUTO_INCREMENT so each account can own its own row.
     await pool.query(`ALTER TABLE capital_settings MODIFY COLUMN id INT AUTO_INCREMENT PRIMARY KEY`);
-  } catch {
-    /* ignore — fresh installs already use AUTO_INCREMENT */
+  } catch (e) {
+    console.error('[db] migrate warning: capital_settings id AUTO_INCREMENT conversion skipped:', e?.message);
   }
   try {
     // Old installs: single row id=1 with no owner -> give it to the first user.
