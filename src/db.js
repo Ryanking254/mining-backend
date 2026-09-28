@@ -70,6 +70,10 @@ export async function migrate() {
       twofa_secret VARCHAR(255) NULL,
       twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
       twofa_backup_codes TEXT NULL,
+      is_admin TINYINT(1) NOT NULL DEFAULT 0,
+      is_suspended TINYINT(1) NOT NULL DEFAULT 0,
+      suspension_reason TEXT NULL,
+      suspended_at TIMESTAMP NULL,
       created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
       INDEX idx_users_email (email)
     )`,
@@ -356,6 +360,10 @@ export async function migrate() {
     ['twofa_secret', 'twofa_secret VARCHAR(255) NULL'],
     ['twofa_enabled', 'twofa_enabled TINYINT(1) NOT NULL DEFAULT 0'],
     ['twofa_backup_codes', 'twofa_backup_codes TEXT NULL'],
+    ['is_admin', 'is_admin TINYINT(1) NOT NULL DEFAULT 0'],
+    ['is_suspended', 'is_suspended TINYINT(1) NOT NULL DEFAULT 0'],
+    ['suspension_reason', 'suspension_reason TEXT NULL'],
+    ['suspended_at', 'suspended_at TIMESTAMP NULL'],
   ];
   for (const [col, def] of userCols) {
     try {
@@ -375,5 +383,24 @@ export async function migrate() {
     }
   } catch {
     /* ignore — may already exist via UNIQUE column definition on fresh installs */
+  }
+  // Bootstrap admin: if ADMIN_EMAIL is set, promote matching accounts.
+  // This is the supported way to make yourself the only admin — set it in
+  // .env / Render env vars, then register (or log in) with that email.
+  // Manual fallback: UPDATE users SET is_admin = 1 WHERE email = 'you@example.com';
+  try {
+    const adminEmails = String(process.env.ADMIN_EMAIL ?? process.env.ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((s) => s.trim().toLowerCase())
+      .filter(Boolean);
+    if (adminEmails.length > 0) {
+      const placeholders = adminEmails.map(() => '?').join(',');
+      await pool.query(
+        `UPDATE users SET is_admin = 1 WHERE LOWER(email) IN (${placeholders})`,
+        adminEmails
+      );
+    }
+  } catch {
+    /* ignore — best effort */
   }
 }

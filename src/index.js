@@ -3,13 +3,14 @@ import express from 'express';
 import cors from 'cors';
 import { pool, migrate, pingDb } from './db.js';
 import auth from './routes/auth.js';
-import { requireAuth, enforceTwofa } from './middleware/auth.js';
+import { requireAuth, requireAdmin, enforceSuspension, enforceTwofa } from './middleware/auth.js';
 import batches from './routes/batches.js';
 import sales from './routes/sales.js';
 import loans from './routes/loans.js';
 import expenditures from './routes/expenditures.js';
 import withdrawals from './routes/withdrawals.js';
 import capital from './routes/capital.js';
+import admin from './routes/admin.js';
 
 const app = express();
 const PORT = Number(process.env.PORT || 8080);
@@ -44,14 +45,19 @@ app.get('/api/health', async (req, res) => {
 });
 
 app.use('/api/auth', auth);
-// Ledger data is blocked once the authenticator grace period expires.
-// Auth endpoints stay reachable so overdue users can still complete setup.
-app.use('/api/batches', requireAuth, enforceTwofa, batches);
-app.use('/api/sales', requireAuth, enforceTwofa, sales);
-app.use('/api/loans', requireAuth, enforceTwofa, loans);
-app.use('/api/expenditures', requireAuth, enforceTwofa, expenditures);
-app.use('/api/withdrawals', requireAuth, enforceTwofa, withdrawals);
-app.use('/api/capital', requireAuth, enforceTwofa, capital);
+// Suspended accounts are blocked from ledger data (killswitch) but can still
+// sign in + hit /auth/me + /admin? No — admin routes need requireAdmin.
+// Auth endpoints stay reachable so suspended users see the paused message.
+app.use('/api/admin', requireAuth, requireAdmin, admin);
+// Ledger data is blocked once the authenticator grace period expires, and for
+// suspended accounts. Auth endpoints stay reachable so overdue users can still
+// complete setup.
+app.use('/api/batches', requireAuth, enforceSuspension, enforceTwofa, batches);
+app.use('/api/sales', requireAuth, enforceSuspension, enforceTwofa, sales);
+app.use('/api/loans', requireAuth, enforceSuspension, enforceTwofa, loans);
+app.use('/api/expenditures', requireAuth, enforceSuspension, enforceTwofa, expenditures);
+app.use('/api/withdrawals', requireAuth, enforceSuspension, enforceTwofa, withdrawals);
+app.use('/api/capital', requireAuth, enforceSuspension, enforceTwofa, capital);
 
 app.use('/api', (req, res) => res.status(404).json({ error: 'Not found' }));
 

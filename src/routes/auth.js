@@ -20,7 +20,32 @@ const mapUser = (r) => ({
   googleLinked: !!r.google_id,
   twofaEnabled: !!r.twofa_enabled,
   createdAt: r.created_at,
+  isAdmin: !!(r.is_admin ?? 0),
+  isSuspended: !!(r.is_suspended ?? 0),
+  suspensionReason: r.suspension_reason ?? null,
 });
+
+function getAdminEmails() {
+  return String(process.env.ADMIN_EMAIL ?? process.env.ADMIN_EMAILS ?? '')
+    .split(',')
+    .map((s) => s.trim().toLowerCase())
+    .filter(Boolean);
+}
+
+function isAdminEmail(email) {
+  return getAdminEmails().includes(String(email || '').trim().toLowerCase());
+}
+
+/** Promote matching ADMIN_EMAIL accounts (bootstrap for the owner). Best-effort. */
+async function maybePromoteAdmin(userId, email) {
+  try {
+    if (isAdminEmail(email)) {
+      await pool.query('UPDATE users SET is_admin = 1 WHERE id = ?', [userId]);
+      return true;
+    }
+  } catch { /* ignore */ }
+  return false;
+}
 
 function validateEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
@@ -117,6 +142,15 @@ router.post(
       /* ignore — capital endpoints lazily create the row */
     }
     const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [result.insertId]);
+    if (isAdminEmail(normalizedEmail)) {
+      await maybePromoteAdmin(result.insertId, normalizedEmail);
+      const [refreshed] = await pool.query('SELECT * FROM users WHERE id = ?', [result.insertId]);
+      if (refreshed[0]) {
+        const user = mapUser(refreshed[0]);
+        res.status(201).json({ user, token: signToken(user) });
+        return;
+      }
+    }
     const user = mapUser(rows[0]);
     res.status(201).json({ user, token: signToken(user) });
   })
@@ -144,6 +178,11 @@ router.post(
     const ok = await bcrypt.compare(password, row.password_hash);
     if (!ok) {
       return res.status(401).json({ error: 'Invalid email or password' });
+    }
+    // Owner bootstrap — ADMIN_EMAIL always lands as admin, even on older rows.
+    if (isAdminEmail(row.email) && !row.is_admin) {
+      await maybePromoteAdmin(row.id, row.email);
+      row.is_admin = 1;
     }
     // 2FA gate — don't issue a full session yet.
     if (row.twofa_enabled) {
@@ -237,6 +276,10 @@ router.post(
     } else if (avatar && !row.avatar_url) {
       await pool.query('UPDATE users SET avatar_url = ? WHERE id = ?', [avatar, row.id]);
       row.avatar_url = avatar;
+    }
+    if (isAdminEmail(row.email) && !row.is_admin) {
+      await maybePromoteAdmin(row.id, row.email);
+      row.is_admin = 1;
     }
 
     if (row.twofa_enabled) {
@@ -395,6 +438,12 @@ router.post('/2fa/disable', requireAuth, (req, res) => {
 router.get('/me', requireAuth, ah(async (req, res) => {
   const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
   if (rows.length === 0) throw notFound('User not found');
+  if (isAdminEmail(rows[0].email) && !rows[0].is_admin) {
+    await maybePromoteAdmin(rows[0].id, rows[0].email);
+    const [refreshed] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    res.json(mapUser(refreshed[0]));
+    return;
+  }
   res.json(mapUser(rows[0]));
 }));
 

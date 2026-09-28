@@ -16,6 +16,10 @@ CREATE TABLE IF NOT EXISTS users (
   twofa_secret VARCHAR(255) NULL,
   twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
   twofa_backup_codes TEXT NULL,
+  is_admin TINYINT(1) NOT NULL DEFAULT 0,
+  is_suspended TINYINT(1) NOT NULL DEFAULT 0,
+  suspension_reason TEXT NULL,
+  suspended_at TIMESTAMP NULL,
   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
   INDEX idx_users_email (email)
 );

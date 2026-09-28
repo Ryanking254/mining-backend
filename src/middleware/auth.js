@@ -48,6 +48,68 @@ export function requireAuth(req, res, next) {
   }
 }
 
+/** Admin-only gate — checks the live is_admin flag (not the JWT). */
+export function requireAdmin(req, res, next) {
+  Promise.resolve()
+    .then(async () => {
+      if (!req.user?.id) return res.status(401).json({ error: 'Unauthorized' });
+      const [rows] = await pool.query(
+        'SELECT is_admin FROM users WHERE id = ?',
+        [req.user.id]
+      );
+      if (rows.length === 0) {
+        const err = new Error('User not found');
+        err.status = 404;
+        throw err;
+      }
+      if (!rows[0].is_admin) {
+        return res.status(403).json({ error: 'Admin access required', code: 'ADMIN_REQUIRED' });
+      }
+      req.isAdmin = true;
+      return next();
+    })
+    .catch(next);
+}
+
+/**
+ * Killswitch gate — blocks ledger data APIs for suspended accounts.
+ * The frontend shows "Your services have been paused…" with the reason.
+ * Auth + admin endpoints stay reachable so the user can still sign in and
+ * see the message, and the admin can still manage them.
+ */
+export function enforceSuspension(req, res, next) {
+  Promise.resolve()
+    .then(async () => {
+      if (!req.user?.id) return next();
+      let rows;
+      try {
+        [rows] = await pool.query(
+          'SELECT is_suspended, suspension_reason FROM users WHERE id = ?',
+          [req.user.id]
+        );
+      } catch (e) {
+        // Older DBs without the columns (migrate hasn't run yet) — don't
+        // block everyone; treat as not suspended.
+        if (e?.code === 'ER_BAD_FIELD_ERROR') return next();
+        throw e;
+      }
+      if (rows.length === 0) {
+        const err = new Error('User not found');
+        err.status = 404;
+        throw err;
+      }
+      if (rows[0].is_suspended) {
+        return res.status(403).json({
+          error: 'Your services have been paused. Please contact support.',
+          code: 'ACCOUNT_SUSPENDED',
+          reason: rows[0].suspension_reason || null,
+        });
+      }
+      return next();
+    })
+    .catch(next);
+}
+
 /**
  * Block ledger data APIs once the authenticator grace period has expired.
  * Auth endpoints (setup/confirm/status/me) are intentionally NOT guarded so
