@@ -1,6 +1,16 @@
 import { Router } from 'express';
 import { pool } from '../db.js';
-import { ah, badRequest, notFound } from '../utils.js';
+import {
+  ah,
+  badRequest,
+  notFound,
+  num,
+  mapBatch,
+  mapSale,
+  mapLoan,
+  mapExpenditure,
+  mapWithdrawal,
+} from '../utils.js';
 
 const router = Router();
 
@@ -100,6 +110,293 @@ router.patch(
       [targetId]
     );
     res.json(mapAdminUser(refreshed[0]));
+  })
+);
+
+/* ------------------------------------------------------------------ */
+/* Tracking: let the admin see / track any other account's ledger data */
+/* ------------------------------------------------------------------ */
+
+async function ensureTargetUser(targetId) {
+  if (!Number.isInteger(targetId) || targetId <= 0) throw badRequest('Invalid user id');
+  const [rows] = await pool.query('SELECT id FROM users WHERE id = ?', [targetId]);
+  if (rows.length === 0) throw notFound('User not found');
+}
+
+async function userCapitalSnapshot(userId) {
+  const [[cap]] = await pool.query(
+    'SELECT starting_capital FROM capital_settings WHERE user_id = ?',
+    [userId]
+  );
+  const [[sales]] = await pool.query(
+    'SELECT COALESCE(SUM(total_selling_price),0) AS revenue, COALESCE(SUM(profit_loss),0) AS profit, COUNT(*) AS count FROM sales WHERE user_id = ?',
+    [userId]
+  );
+  const [[purch]] = await pool.query(
+    'SELECT COALESCE(SUM(total_cost),0) AS cost, COALESCE(SUM(grams_bought),0) AS bought, COALESCE(SUM(grams_remaining),0) AS remaining, COUNT(*) AS count FROM batches WHERE user_id = ?',
+    [userId]
+  );
+  const [[exp]] = await pool.query(
+    'SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM expenditures WHERE user_id = ?',
+    [userId]
+  );
+  const [[wd]] = await pool.query(
+    'SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM withdrawals WHERE user_id = ?',
+    [userId]
+  );
+  const [[loans]] = await pool.query(
+    `SELECT COALESCE(SUM(amount_given),0) AS given,
+            COALESCE(SUM(amount_repaid),0) AS repaid,
+            COALESCE(SUM(amount_given - amount_repaid),0) AS outstanding,
+            COUNT(*) AS count
+     FROM loans WHERE user_id = ? AND status != 'REPAID'`,
+    [userId]
+  );
+  const [[loansAll]] = await pool.query(
+    'SELECT COUNT(*) AS count FROM loans WHERE user_id = ?',
+    [userId]
+  );
+  let added = 0;
+  try {
+    const [[row]] = await pool.query(
+      'SELECT COALESCE(SUM(amount),0) AS total FROM capital_additions WHERE user_id = ?',
+      [userId]
+    );
+    added = num(row?.total);
+  } catch {
+    added = 0;
+  }
+  const startingCapital = num(cap?.starting_capital);
+  const manualAdditions = added;
+  const salesRevenue = num(sales?.revenue);
+  const salesProfit = num(sales?.profit);
+  const purchaseCost = num(purch?.cost);
+  const expenditures = num(exp?.total);
+  const withdrawals = num(wd?.total);
+  const loansOutstanding = num(loans?.outstanding);
+  const currentCapital =
+    startingCapital + manualAdditions + salesRevenue - purchaseCost - expenditures - withdrawals - loansOutstanding;
+  return {
+    startingCapital,
+    manualAdditions,
+    addedCapital: manualAdditions,
+    salesRevenue,
+    salesProfit,
+    purchaseCost,
+    expenditures,
+    withdrawals,
+    loansOutstanding,
+    loansGiven: num(loans?.given),
+    loansRepaid: num(loans?.repaid),
+    currentCapital,
+    total: currentCapital,
+    counts: {
+      batches: num(purch?.count),
+      sales: num(sales?.count),
+      loans: num(loansAll?.count),
+      expenditures: num(exp?.count),
+      withdrawals: num(wd?.count),
+      gramsBought: num(purch?.bought),
+      gramsRemaining: num(purch?.remaining),
+    },
+    breakdown: {
+      starting: startingCapital,
+      added: manualAdditions,
+      sales: salesRevenue,
+      profit: salesProfit,
+      purchases: purchaseCost,
+      expenditures,
+      withdrawals,
+      loansOutstanding,
+    },
+  };
+}
+
+/**
+ * GET /api/admin/overview — platform-wide totals across all non-admin accounts.
+ * Used for the cards at the top of the admin page.
+ */
+router.get(
+  '/overview',
+  ah(async (req, res) => {
+    const [[users]] = await pool.query(
+      `SELECT COUNT(*) AS total,
+              SUM(is_suspended) AS suspended,
+              SUM(is_admin) AS admins
+       FROM users`
+    );
+    const [[sales]] = await pool.query(
+      'SELECT COALESCE(SUM(total_selling_price),0) AS revenue, COALESCE(SUM(profit_loss),0) AS profit, COUNT(*) AS count FROM sales'
+    );
+    const [[purch]] = await pool.query(
+      'SELECT COALESCE(SUM(total_cost),0) AS cost, COUNT(*) AS count FROM batches'
+    );
+    const [[exp]] = await pool.query(
+      'SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM expenditures'
+    );
+    const [[wd]] = await pool.query(
+      'SELECT COALESCE(SUM(amount),0) AS total, COUNT(*) AS count FROM withdrawals'
+    );
+    const [[loans]] = await pool.query(
+      `SELECT COALESCE(SUM(amount_given - amount_repaid),0) AS outstanding,
+              COALESCE(SUM(amount_given),0) AS given, COUNT(*) AS count
+       FROM loans WHERE status != 'REPAID'`
+    );
+    const total = num(users?.total);
+    const admins = num(users?.admins);
+    const suspended = num(users?.suspended);
+    res.json({
+      totalUsers: total,
+      adminCount: admins,
+      regularUsers: total - admins,
+      activeUsers: total - suspended,
+      suspendedUsers: suspended,
+      totalRevenue: num(sales?.revenue),
+      totalProfit: num(sales?.profit),
+      totalSales: num(sales?.count),
+      totalPurchaseCost: num(purch?.cost),
+      totalBatches: num(purch?.count),
+      totalExpenditures: num(exp?.total),
+      totalExpenditureCount: num(exp?.count),
+      totalWithdrawals: num(wd?.total),
+      totalWithdrawalCount: num(wd?.count),
+      loansOutstanding: num(loans?.outstanding),
+      loansGiven: num(loans?.given),
+      openLoans: num(loans?.count),
+    });
+  })
+);
+
+/**
+ * GET /api/admin/users/:id/summary — one account's KPI snapshot + row counts.
+ */
+router.get(
+  '/users/:id/summary',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    res.json(await userCapitalSnapshot(targetId));
+  })
+);
+
+/**
+ * GET /api/admin/users/:id/capital — snapshot + manual top-up history.
+ */
+router.get(
+  '/users/:id/capital',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const snapshot = await userCapitalSnapshot(targetId);
+    let additions = [];
+    try {
+      const [rows] = await pool.query(
+        'SELECT id, amount, note, created_at AS createdAt FROM capital_additions WHERE user_id = ? ORDER BY id DESC LIMIT 100',
+        [targetId]
+      );
+      additions = rows.map((r) => ({
+        id: r.id,
+        amount: Number(r.amount),
+        note: r.note,
+        createdAt: r.createdAt,
+      }));
+    } catch (e) {
+      if (e?.code !== 'ER_NO_SUCH_TABLE') throw e;
+    }
+    res.json({ ...snapshot, additions });
+  })
+);
+
+/** GET /api/admin/users/:id/batches — that account's batches, newest first. */
+router.get(
+  '/users/:id/batches',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const [rows] = await pool.query(
+      'SELECT * FROM batches WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 200',
+      [targetId]
+    );
+    res.json(rows.map(mapBatch));
+  })
+);
+
+/** GET /api/admin/users/:id/sales — that account's sales, newest first. */
+router.get(
+  '/users/:id/sales',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const [rows] = await pool.query(
+      `SELECT s.*, b.batch_number FROM sales s
+       JOIN batches b ON b.id = s.batch_id
+       WHERE s.user_id = ? ORDER BY s.sale_date DESC, s.id DESC LIMIT 200`,
+      [targetId]
+    );
+    if (rows.length > 0) {
+      const ids = rows.map((r) => r.id);
+      const [items] = await pool.query(
+        `SELECT sb.sale_id, sb.batch_id, b.batch_number
+         FROM sale_batches sb JOIN batches b ON b.id = sb.batch_id
+         WHERE sb.sale_id IN (?) ORDER BY sb.id ASC`,
+        [ids]
+      );
+      const bySale = new Map();
+      for (const it of items) {
+        if (!bySale.has(it.sale_id)) bySale.set(it.sale_id, []);
+        bySale.get(it.sale_id).push(it);
+      }
+      for (const r of rows) {
+        const list = bySale.get(r.id);
+        if (list?.length) {
+          r.batch_ids = list.map((x) => x.batch_id);
+          r.batch_numbers = list.map((x) => x.batch_number);
+        }
+      }
+    }
+    res.json(rows.map(mapSale));
+  })
+);
+
+/** GET /api/admin/users/:id/loans — that account's loans, newest first. */
+router.get(
+  '/users/:id/loans',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const [rows] = await pool.query(
+      'SELECT * FROM loans WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 200',
+      [targetId]
+    );
+    res.json(rows.map(mapLoan));
+  })
+);
+
+/** GET /api/admin/users/:id/expenditures — that account's expenses. */
+router.get(
+  '/users/:id/expenditures',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const [rows] = await pool.query(
+      'SELECT * FROM expenditures WHERE user_id = ? ORDER BY expense_date DESC, id DESC LIMIT 200',
+      [targetId]
+    );
+    res.json(rows.map(mapExpenditure));
+  })
+);
+
+/** GET /api/admin/users/:id/withdrawals — that account's withdrawals. */
+router.get(
+  '/users/:id/withdrawals',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    await ensureTargetUser(targetId);
+    const [rows] = await pool.query(
+      'SELECT * FROM withdrawals WHERE user_id = ? ORDER BY withdrawal_date DESC, id DESC LIMIT 200',
+      [targetId]
+    );
+    res.json(rows.map(mapWithdrawal));
   })
 );
 
