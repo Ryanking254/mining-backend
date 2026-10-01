@@ -91,6 +91,13 @@ async function capitalSnapshot(userId) {
     'SELECT COALESCE(SUM(total_selling_price),0) AS revenue, COALESCE(SUM(profit_loss),0) AS profit FROM sales WHERE user_id = ?',
     [userId]
   );
+  // Today's sales only (sale_date is a DATE column, CURDATE() is the DB day).
+  // Used by the Overview "SALES REVENUE (TODAY)" KPI so it doesn't show the
+  // lifetime total since account activation.
+  const [[todaySales]] = await pool.query(
+    'SELECT COALESCE(SUM(total_selling_price),0) AS revenue, COALESCE(SUM(profit_loss),0) AS profit FROM sales WHERE user_id = ? AND sale_date = CURDATE()',
+    [userId]
+  );
   const [[purch]] = await pool.query(
     'SELECT COALESCE(SUM(total_cost),0) AS cost FROM batches WHERE user_id = ?',
     [userId]
@@ -119,6 +126,8 @@ async function capitalSnapshot(userId) {
   const manualAdditions = added;
   const salesRevenue = num(sales?.revenue);
   const salesProfit = num(sales?.profit);
+  const salesRevenueToday = num(todaySales?.revenue);
+  const salesProfitToday = num(todaySales?.profit);
   const purchaseCost = num(purch?.cost);
   const expenditures = num(exp?.total);
   const withdrawals = num(wd?.total);
@@ -138,6 +147,11 @@ async function capitalSnapshot(userId) {
     addedCapital: manualAdditions,
     salesRevenue,
     salesProfit,
+    // Today-only totals for the Overview KPI (lifetime stays above for capital math).
+    salesRevenueToday,
+    salesProfitToday,
+    todayRevenue: salesRevenueToday,
+    todayProfit: salesProfitToday,
     purchaseCost,
     expenditures,
     withdrawals,
@@ -152,6 +166,9 @@ async function capitalSnapshot(userId) {
       added: manualAdditions,
       sales: salesRevenue,
       profit: salesProfit,
+      todaySales: salesRevenueToday,
+      todayProfit: salesProfitToday,
+      todayRevenue: salesRevenueToday,
       purchases: purchaseCost,
       expenditures,
       withdrawals,
@@ -163,7 +180,8 @@ async function capitalSnapshot(userId) {
 /**
  * GET /api/capital
  * Per-account snapshot. The dashboard reads: currentCapital (fallback: total),
- * breakdown { sales, expenditures }.
+ * breakdown { sales, expenditures }, plus salesRevenueToday / todayRevenue for
+ * the "today only" sales KPI.
  */
 router.get(
   '/',
