@@ -227,8 +227,9 @@ router.get(
 
 /**
  * POST /api/admin/2fa/disable-requests/:id/approve — admin only.
- * Approves the request: the user's authenticator is turned OFF and the
- * account is exempted from mandatory 2FA (they keep full ledger access).
+ * Approves the request: an enabled authenticator is turned OFF; accounts
+ * that never enabled it are exempted from mandatory setup instead. Either
+ * way the account keeps full ledger access without 2FA.
  */
 router.post(
   '/2fa/disable-requests/:id/approve',

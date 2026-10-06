@@ -511,8 +511,11 @@ router.post(
 /**
  * POST /api/auth/2fa/disable-request — requires Bearer token.
  * Body: { reason?: string }
- * Asks an admin to turn off the authenticator app. 2FA STAYS ENABLED until
- * an admin approves — the account keeps working with codes meanwhile.
+ * Asks an admin to lift the authenticator requirement. Works for EVERY
+ * non-exempt account:
+ * - 2FA enabled → request to turn it OFF (stays ON until approved).
+ * - 2FA never enabled (incl. overdue accounts blocked from the ledger) →
+ *   request an exemption from mandatory setup (stays blocked until approved).
  * One PENDING request per user; repeat calls return the existing one (409).
  */
 router.post(
@@ -521,16 +524,24 @@ router.post(
   ah(async (req, res) => {
     const [rows] = await pool.query('SELECT twofa_enabled FROM users WHERE id = ?', [req.user.id]);
     if (rows.length === 0) throw notFound('User not found');
-    if (!rows[0].twofa_enabled) {
-      throw badRequest('Two-factor authentication is not enabled.');
+    let exempt = false;
+    try {
+      const [ex] = await pool.query('SELECT twofa_exempt FROM users WHERE id = ?', [req.user.id]);
+      exempt = !!ex[0]?.twofa_exempt;
+    } catch (e) {
+      if (e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
     }
+    if (exempt) {
+      throw badRequest('Two-factor authentication is already disabled with admin approval.');
+    }
+    const had2fa = !!rows[0].twofa_enabled;
     const reasonRaw = req.body?.reason != null ? String(req.body.reason).trim() : '';
     if (reasonRaw.length > 1000) throw badRequest('Reason is too long (max 1000 chars).');
     await ensureDisableRequestsTable();
     const existing = await getPendingDisableRequest(req.user.id);
     if (existing) {
       return res.status(409).json({
-        error: 'You already have a pending disable request. It stays enabled until an admin approves.',
+        error: 'You already have a pending request. Nothing changes until an admin approves.',
         request: mapDisableRequest(existing),
       });
     }
@@ -540,7 +551,9 @@ router.post(
     );
     const [created] = await pool.query('SELECT * FROM twofa_disable_requests WHERE id = ?', [result.insertId]);
     res.status(201).json({
-      message: 'Request sent. Your authenticator stays enabled until an admin approves.',
+      message: had2fa
+        ? 'Request sent. Your authenticator stays enabled until an admin approves.'
+        : 'Request sent. The authenticator requirement stays in place until an admin approves.',
       request: mapDisableRequest(created[0]),
     });
   })
