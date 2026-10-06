@@ -603,13 +603,41 @@ router.delete(
 );
 
 /**
- * POST /api/auth/2fa/disable — direct disable is not allowed.
- * Ask via POST /2fa/disable-request instead; an admin must approve.
- * Kept as an explicit 403 (instead of 404) so old clients get a clear message.
+ * POST /api/auth/2fa/disable — direct disable, ADMIN ONLY (own account).
+ * Admins have no higher authority to approve them, so they may turn off
+ * their own authenticator directly. Everyone else gets a 403 and must use
+ * POST /2fa/disable-request instead.
  */
-router.post('/2fa/disable', requireAuth, (req, res) => {
-  res.status(403).json({ error: 'Disabling two-factor authentication needs admin approval. Please send a disable request first.' });
-});
+router.post(
+  '/2fa/disable',
+  requireAuth,
+  ah(async (req, res) => {
+    const [rows] = await pool.query('SELECT is_admin, twofa_enabled FROM users WHERE id = ?', [req.user.id]);
+    if (rows.length === 0) throw notFound('User not found');
+    if (!rows[0].is_admin) {
+      return res.status(403).json({ error: 'Disabling two-factor authentication needs admin approval. Please send a disable request first.' });
+    }
+    if (!rows[0].twofa_enabled) throw badRequest('Two-factor authentication is not enabled.');
+    try {
+      await pool.query(
+        'UPDATE users SET twofa_enabled = 0, twofa_secret = NULL, twofa_backup_codes = NULL, twofa_exempt = 1 WHERE id = ?',
+        [req.user.id]
+      );
+    } catch (e) {
+      if (e?.code === 'ER_BAD_FIELD_ERROR') {
+        // Older DBs without twofa_exempt — still turn 2FA off.
+        await pool.query(
+          'UPDATE users SET twofa_enabled = 0, twofa_secret = NULL, twofa_backup_codes = NULL WHERE id = ?',
+          [req.user.id]
+        );
+      } else {
+        throw e;
+      }
+    }
+    const [refreshed] = await pool.query('SELECT * FROM users WHERE id = ?', [req.user.id]);
+    res.json({ disabled: true, user: mapUser(refreshed[0]) });
+  })
+);
 
 /** GET /api/auth/me — requires Bearer token */
 router.get('/me', requireAuth, ah(async (req, res) => {
