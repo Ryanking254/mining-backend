@@ -19,6 +19,7 @@ const mapUser = (r) => ({
   hasPassword: !!r.password_hash,
   googleLinked: !!r.google_id,
   twofaEnabled: !!r.twofa_enabled,
+  twofaExempt: !!(r.twofa_exempt ?? 0),
   createdAt: r.created_at,
   isAdmin: !!(r.is_admin ?? 0),
   isSuspended: !!(r.is_suspended ?? 0),
@@ -81,6 +82,58 @@ function parseBackupHashes(row) {
     return Array.isArray(v) ? v : [];
   } catch {
     return [];
+  }
+}
+
+/* ---- 2FA disable requests (user asks, admin approves, 2FA stays ON meanwhile) ---- */
+
+const DISABLE_REQUESTS_DDL = `CREATE TABLE IF NOT EXISTS twofa_disable_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  status ENUM('PENDING','APPROVED','REJECTED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+  reason VARCHAR(1000) NULL,
+  admin_note VARCHAR(1000) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  decided_at TIMESTAMP NULL,
+  decided_by INT NULL,
+  INDEX idx_tdr_user (user_id),
+  INDEX idx_tdr_status (status),
+  CONSTRAINT fk_tdr_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+)`;
+
+/** Best-effort: make sure the requests table exists (migrate usually covers it). */
+async function ensureDisableRequestsTable() {
+  try {
+    await pool.query(DISABLE_REQUESTS_DDL);
+  } catch {
+    /* ignore — callers fall back to degraded behaviour */
+  }
+}
+
+const mapDisableRequest = (r) => ({
+  id: r.id,
+  userId: r.user_id,
+  status: r.status,
+  reason: r.reason ?? null,
+  adminNote: r.admin_note ?? null,
+  createdAt: r.created_at,
+  decidedAt: r.decided_at ?? null,
+  decidedBy: r.decided_by ?? null,
+});
+
+async function getPendingDisableRequest(userId) {
+  try {
+    const [rows] = await pool.query(
+      'SELECT * FROM twofa_disable_requests WHERE user_id = ? AND status = ? ORDER BY id DESC LIMIT 1',
+      [userId, 'PENDING']
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e?.code === 'ER_NO_SUCH_TABLE') {
+      await ensureDisableRequestsTable();
+      return null;
+    }
+    throw e;
   }
 }
 
@@ -355,15 +408,32 @@ router.get('/2fa/status', requireAuth, ah(async (req, res) => {
     [req.user.id]
   );
   if (rows.length === 0) throw notFound('User not found');
+  let exempt = false;
+  try {
+    const [ex] = await pool.query('SELECT twofa_exempt FROM users WHERE id = ?', [req.user.id]);
+    exempt = !!ex[0]?.twofa_exempt;
+  } catch (e) {
+    if (e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
+  }
   const grace = twofaGraceState({ twofa_enabled: rows[0].twofa_enabled, created_at: rows[0].created_at });
+  let pendingRequest = null;
+  try {
+    const pending = await getPendingDisableRequest(req.user.id);
+    if (pending) pendingRequest = mapDisableRequest(pending);
+  } catch {
+    pendingRequest = null;
+  }
   res.json({
     enabled: !!rows[0].twofa_enabled,
+    exempt,
     backupCodesRemaining: parseBackupHashes(rows[0]).length,
-    required: grace.required,
-    overdue: grace.overdue,
+    // Exempt accounts (2FA disabled with admin approval) are not forced to re-enable.
+    required: exempt ? false : grace.required,
+    overdue: exempt ? false : grace.overdue,
     graceDays: grace.graceDays,
-    daysLeft: grace.daysLeft,
-    deadline: grace.deadline,
+    daysLeft: exempt ? 0 : grace.daysLeft,
+    deadline: exempt ? null : grace.deadline,
+    disableRequest: pendingRequest,
   });
 }));
 
@@ -415,23 +485,117 @@ router.post(
     if (!verified) return res.status(400).json({ error: 'Invalid code. Check your authenticator app time and try again.' });
 
     const backupCodes = generateBackupCodes(10);
-    await pool.query('UPDATE users SET twofa_enabled = 1, twofa_backup_codes = ? WHERE id = ?', [
-      JSON.stringify(backupCodes.map(hashBackupCode)),
-      row.id,
-    ]);
+    const backupJson = JSON.stringify(backupCodes.map(hashBackupCode));
+    try {
+      // Re-enabling clears any admin-granted exemption.
+      await pool.query('UPDATE users SET twofa_enabled = 1, twofa_backup_codes = ?, twofa_exempt = 0 WHERE id = ?', [
+        backupJson,
+        row.id,
+      ]);
+    } catch (e) {
+      if (e?.code === 'ER_BAD_FIELD_ERROR') {
+        // Older DBs without the twofa_exempt column.
+        await pool.query('UPDATE users SET twofa_enabled = 1, twofa_backup_codes = ? WHERE id = ?', [
+          backupJson,
+          row.id,
+        ]);
+      } else {
+        throw e;
+      }
+    }
     const [refreshed] = await pool.query('SELECT * FROM users WHERE id = ?', [row.id]);
     res.json({ enabled: true, backupCodes, user: mapUser(refreshed[0]) });
   })
 );
 
 /**
- * POST /api/auth/2fa/disable — permanently disabled by policy.
- * The authenticator app is mandatory, so there is no supported way to turn
- * it off. Kept as an explicit 403 (instead of 404) so old clients get a
- * clear message.
+ * POST /api/auth/2fa/disable-request — requires Bearer token.
+ * Body: { reason?: string }
+ * Asks an admin to turn off the authenticator app. 2FA STAYS ENABLED until
+ * an admin approves — the account keeps working with codes meanwhile.
+ * One PENDING request per user; repeat calls return the existing one (409).
+ */
+router.post(
+  '/2fa/disable-request',
+  requireAuth,
+  ah(async (req, res) => {
+    const [rows] = await pool.query('SELECT twofa_enabled FROM users WHERE id = ?', [req.user.id]);
+    if (rows.length === 0) throw notFound('User not found');
+    if (!rows[0].twofa_enabled) {
+      throw badRequest('Two-factor authentication is not enabled.');
+    }
+    const reasonRaw = req.body?.reason != null ? String(req.body.reason).trim() : '';
+    if (reasonRaw.length > 1000) throw badRequest('Reason is too long (max 1000 chars).');
+    await ensureDisableRequestsTable();
+    const existing = await getPendingDisableRequest(req.user.id);
+    if (existing) {
+      return res.status(409).json({
+        error: 'You already have a pending disable request. It stays enabled until an admin approves.',
+        request: mapDisableRequest(existing),
+      });
+    }
+    const [result] = await pool.query(
+      'INSERT INTO twofa_disable_requests (user_id, status, reason) VALUES (?, ?, ?)',
+      [req.user.id, 'PENDING', reasonRaw === '' ? null : reasonRaw.slice(0, 1000)]
+    );
+    const [created] = await pool.query('SELECT * FROM twofa_disable_requests WHERE id = ?', [result.insertId]);
+    res.status(201).json({
+      message: 'Request sent. Your authenticator stays enabled until an admin approves.',
+      request: mapDisableRequest(created[0]),
+    });
+  })
+);
+
+/**
+ * GET /api/auth/2fa/disable-requests — own request history (newest first).
+ * Requires Bearer token.
+ */
+router.get(
+  '/2fa/disable-requests',
+  requireAuth,
+  ah(async (req, res) => {
+    await ensureDisableRequestsTable();
+    let rows;
+    try {
+      [rows] = await pool.query(
+        'SELECT * FROM twofa_disable_requests WHERE user_id = ? ORDER BY id DESC LIMIT 20',
+        [req.user.id]
+      );
+    } catch (e) {
+      if (e?.code === 'ER_NO_SUCH_TABLE') return res.json([]);
+      throw e;
+    }
+    res.json(rows.map(mapDisableRequest));
+  })
+);
+
+/**
+ * DELETE /api/auth/2fa/disable-request — cancel your own PENDING request.
+ * Requires Bearer token. 2FA stays enabled (nothing changes except the request).
+ */
+router.delete(
+  '/2fa/disable-request',
+  requireAuth,
+  ah(async (req, res) => {
+    await ensureDisableRequestsTable();
+    const pending = await getPendingDisableRequest(req.user.id);
+    if (!pending) throw notFound('No pending disable request.');
+    await pool.query(
+      "UPDATE twofa_disable_requests SET status = 'CANCELLED', decided_at = ? WHERE id = ?",
+      [new Date(), pending.id]
+    );
+    const [refreshed] = await pool.query('SELECT * FROM twofa_disable_requests WHERE id = ?', [pending.id]);
+    res.json({ cancelled: true, request: mapDisableRequest(refreshed[0]) });
+  })
+);
+
+/**
+ * POST /api/auth/2fa/disable — direct disable is not allowed.
+ * Ask via POST /2fa/disable-request instead; an admin must approve.
+ * Kept as an explicit 403 (instead of 404) so old clients get a clear message.
  */
 router.post('/2fa/disable', requireAuth, (req, res) => {
-  res.status(403).json({ error: 'Disabling two-factor authentication is not allowed.' });
+  res.status(403).json({ error: 'Disabling two-factor authentication needs admin approval. Please send a disable request first.' });
 });
 
 /** GET /api/auth/me — requires Bearer token */

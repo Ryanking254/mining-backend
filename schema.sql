@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS users (
   twofa_secret VARCHAR(255) NULL,
   twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
   twofa_backup_codes TEXT NULL,
+  twofa_exempt TINYINT(1) NOT NULL DEFAULT 0,
   is_admin TINYINT(1) NOT NULL DEFAULT 0,
   is_suspended TINYINT(1) NOT NULL DEFAULT 0,
   suspension_reason TEXT NULL,
@@ -129,6 +130,23 @@ CREATE TABLE IF NOT EXISTS withdrawals (
   INDEX idx_wd_user (user_id),
   INDEX idx_wd_date (withdrawal_date),
   CONSTRAINT fk_wd_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
+);
+
+-- 2FA disable requests — user asks to turn off the authenticator app, but it
+-- stays ON until an admin approves. One PENDING request per user at a time
+-- (enforced in app logic; history rows stay for audit).
+CREATE TABLE IF NOT EXISTS twofa_disable_requests (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  user_id INT NOT NULL,
+  status ENUM('PENDING','APPROVED','REJECTED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+  reason VARCHAR(1000) NULL,
+  admin_note VARCHAR(1000) NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  decided_at TIMESTAMP NULL,
+  decided_by INT NULL,
+  INDEX idx_tdr_user (user_id),
+  INDEX idx_tdr_status (status),
+  CONSTRAINT fk_tdr_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
 );
 
 -- One row per account holding that account's starting capital.

@@ -120,16 +120,28 @@ export function enforceTwofa(req, res, next) {
   Promise.resolve()
     .then(async () => {
       if (!req.user?.id) return next();
-      const [rows] = await pool.query(
-        'SELECT twofa_enabled, created_at FROM users WHERE id = ?',
-        [req.user.id]
-      );
+      let rows;
+      try {
+        [rows] = await pool.query(
+          'SELECT twofa_enabled, twofa_exempt, created_at FROM users WHERE id = ?',
+          [req.user.id]
+        );
+      } catch (e) {
+        // Older DBs without twofa_exempt — fall back to the base columns.
+        if (e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
+        [rows] = await pool.query(
+          'SELECT twofa_enabled, created_at FROM users WHERE id = ?',
+          [req.user.id]
+        );
+      }
       if (rows.length === 0) {
         const err = new Error('User not found');
         err.status = 404;
         throw err;
       }
       if (rows[0].twofa_enabled) return next();
+      // 2FA disabled with admin approval — exempt from mandatory setup.
+      if (rows[0].twofa_exempt) return next();
       const graceDays = getTwofaGraceDays();
       const created = parseDbDate(rows[0].created_at);
       const deadline = created ? new Date(created.getTime() + graceDays * 86400000) : null;

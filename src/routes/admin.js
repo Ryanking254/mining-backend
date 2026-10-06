@@ -24,7 +24,24 @@ const mapAdminUser = (r) => ({
   suspensionReason: r.suspension_reason ?? null,
   suspendedAt: r.suspended_at ?? null,
   twofaEnabled: !!r.twofa_enabled,
+  twofaExempt: !!(r.twofa_exempt ?? 0),
   createdAt: r.created_at,
+});
+
+const mapDisableRequest = (r) => ({
+  id: r.id,
+  status: r.status,
+  reason: r.reason ?? null,
+  adminNote: r.admin_note ?? null,
+  createdAt: r.created_at,
+  decidedAt: r.decided_at ?? null,
+  decidedBy: r.decided_by ?? null,
+  user: {
+    id: r.user_id,
+    name: r.user_name ?? null,
+    email: r.user_email ?? null,
+    twofaEnabled: r.user_twofa_enabled != null ? !!r.user_twofa_enabled : undefined,
+  },
 });
 
 /**
@@ -38,13 +55,23 @@ router.get(
     try {
       [rows] = await pool.query(
         `SELECT id, name, email, avatar_url, is_admin, is_suspended,
-                suspension_reason, suspended_at, twofa_enabled, created_at
+                suspension_reason, suspended_at, twofa_enabled, twofa_exempt, created_at
          FROM users ORDER BY id ASC`
       );
     } catch (e) {
       // Older DBs without the admin columns — select the base columns and
       // synthesize defaults so the admin page doesn't 500 before migrate runs.
       if (e?.code === 'ER_BAD_FIELD_ERROR') {
+        try {
+          [rows] = await pool.query(
+            `SELECT id, name, email, avatar_url, is_admin, is_suspended,
+                    suspension_reason, suspended_at, twofa_enabled, created_at
+             FROM users ORDER BY id ASC`
+          );
+          return res.json(rows.map((r) => ({ ...mapAdminUser(r), twofaExempt: false })));
+        } catch {
+          /* fall through to the oldest fallback below */
+        }
         const [base] = await pool.query(
           `SELECT id, name, email, avatar_url, twofa_enabled, created_at FROM users ORDER BY id ASC`
         );
@@ -59,6 +86,7 @@ router.get(
             suspensionReason: null,
             suspendedAt: null,
             twofaEnabled: !!r.twofa_enabled,
+            twofaExempt: false,
             createdAt: r.created_at,
           }))
         );
@@ -105,10 +133,191 @@ router.patch(
     );
     const [refreshed] = await pool.query(
       `SELECT id, name, email, avatar_url, is_admin, is_suspended,
-              suspension_reason, suspended_at, twofa_enabled, created_at
+              suspension_reason, suspended_at, twofa_enabled, twofa_exempt, created_at
        FROM users WHERE id = ?`,
       [targetId]
     );
+    res.json(mapAdminUser(refreshed[0]));
+  })
+);
+
+/* ------------------------------------------------------------------ */
+/* Authenticator disable requests: user asks, admin approves/rejects.  */
+/* 2FA stays ON until approval; approval turns it OFF + exempts the    */
+/* account from the mandatory-authenticator grace enforcement.         */
+/* ------------------------------------------------------------------ */
+
+async function getDisableRequest(id) {
+  try {
+    const [rows] = await pool.query(
+      `SELECT t.*, u.name AS user_name, u.email AS user_email,
+              u.twofa_enabled AS user_twofa_enabled
+       FROM twofa_disable_requests t
+       JOIN users u ON u.id = t.user_id
+       WHERE t.id = ?`,
+      [id]
+    );
+    return rows[0] || null;
+  } catch (e) {
+    if (e?.code === 'ER_NO_SUCH_TABLE') return null;
+    throw e;
+  }
+}
+
+/** Turn a user's 2FA off and mark them exempt from mandatory 2FA. */
+async function disableUserTwofa(userId) {
+  try {
+    await pool.query(
+      'UPDATE users SET twofa_enabled = 0, twofa_secret = NULL, twofa_backup_codes = NULL, twofa_exempt = 1 WHERE id = ?',
+      [userId]
+    );
+  } catch (e) {
+    if (e?.code === 'ER_BAD_FIELD_ERROR') {
+      // Older DBs without twofa_exempt — still turn 2FA off.
+      await pool.query(
+        'UPDATE users SET twofa_enabled = 0, twofa_secret = NULL, twofa_backup_codes = NULL WHERE id = ?',
+        [userId]
+      );
+    } else {
+      throw e;
+    }
+  }
+}
+
+/**
+ * GET /api/admin/2fa/disable-requests?status=PENDING (or ALL) — admin only.
+ * Lists authenticator disable requests with the requesting account attached.
+ */
+router.get(
+  '/2fa/disable-requests',
+  ah(async (req, res) => {
+    const filter = String(req.query?.status ?? 'PENDING').trim().toUpperCase();
+    let rows;
+    try {
+      if (filter === 'ALL') {
+        [rows] = await pool.query(
+          `SELECT t.*, u.name AS user_name, u.email AS user_email,
+                  u.twofa_enabled AS user_twofa_enabled
+           FROM twofa_disable_requests t
+           JOIN users u ON u.id = t.user_id
+           ORDER BY
+             CASE t.status WHEN 'PENDING' THEN 0 ELSE 1 END ASC,
+             t.id DESC
+           LIMIT 100`
+        );
+      } else {
+        [rows] = await pool.query(
+          `SELECT t.*, u.name AS user_name, u.email AS user_email,
+                  u.twofa_enabled AS user_twofa_enabled
+           FROM twofa_disable_requests t
+           JOIN users u ON u.id = t.user_id
+           WHERE t.status = ?
+           ORDER BY t.id DESC
+           LIMIT 100`,
+          [filter === 'PENDING' ? 'PENDING' : filter]
+        );
+      }
+    } catch (e) {
+      if (e?.code === 'ER_NO_SUCH_TABLE') return res.json([]);
+      throw e;
+    }
+    res.json(rows.map(mapDisableRequest));
+  })
+);
+
+/**
+ * POST /api/admin/2fa/disable-requests/:id/approve — admin only.
+ * Approves the request: the user's authenticator is turned OFF and the
+ * account is exempted from mandatory 2FA (they keep full ledger access).
+ */
+router.post(
+  '/2fa/disable-requests/:id/approve',
+  ah(async (req, res) => {
+    const requestId = Number(req.params.id);
+    if (!Number.isInteger(requestId) || requestId <= 0) throw badRequest('Invalid request id');
+    const found = await getDisableRequest(requestId);
+    if (!found) throw notFound('Request not found');
+    if (found.status !== 'PENDING') {
+      throw badRequest(`Request is already ${String(found.status).toLowerCase()}.`);
+    }
+    await disableUserTwofa(found.user_id);
+    await pool.query(
+      'UPDATE twofa_disable_requests SET status = ?, decided_at = ?, decided_by = ? WHERE id = ?',
+      ['APPROVED', new Date(), req.user.id, requestId]
+    );
+    res.json(mapDisableRequest(await getDisableRequest(requestId)));
+  })
+);
+
+/**
+ * POST /api/admin/2fa/disable-requests/:id/reject — admin only.
+ * Body: { note?: string } — rejects the request; the user's 2FA stays ON.
+ */
+router.post(
+  '/2fa/disable-requests/:id/reject',
+  ah(async (req, res) => {
+    const requestId = Number(req.params.id);
+    if (!Number.isInteger(requestId) || requestId <= 0) throw badRequest('Invalid request id');
+    const noteRaw = req.body?.note != null ? String(req.body.note).trim() : '';
+    if (noteRaw.length > 1000) throw badRequest('Note is too long (max 1000 chars).');
+    const found = await getDisableRequest(requestId);
+    if (!found) throw notFound('Request not found');
+    if (found.status !== 'PENDING') {
+      throw badRequest(`Request is already ${String(found.status).toLowerCase()}.`);
+    }
+    await pool.query(
+      'UPDATE twofa_disable_requests SET status = ?, admin_note = ?, decided_at = ?, decided_by = ? WHERE id = ?',
+      ['REJECTED', noteRaw === '' ? null : noteRaw.slice(0, 1000), new Date(), req.user.id, requestId]
+    );
+    res.json(mapDisableRequest(await getDisableRequest(requestId)));
+  })
+);
+
+/**
+ * PATCH /api/admin/users/:id/2fa-exempt — admin only.
+ * Body: { exempt: boolean }
+ * - exempt=false → re-require the authenticator (clears an approval; an
+ *   overdue account is blocked from ledger data until they enable 2FA again).
+ * - exempt=true → directly disable 2FA + exempt (same effect as approving a
+ *   request; useful when the user is locked out and cannot request).
+ * Admin accounts (incl. yourself) cannot be changed here — use a request flow.
+ */
+router.patch(
+  '/users/:id/2fa-exempt',
+  ah(async (req, res) => {
+    const targetId = Number(req.params.id);
+    if (!Number.isInteger(targetId) || targetId <= 0) throw badRequest('Invalid user id');
+    const { exempt } = req.body ?? {};
+    if (typeof exempt !== 'boolean') throw badRequest('`exempt` must be true or false');
+    const [rows] = await pool.query('SELECT * FROM users WHERE id = ?', [targetId]);
+    if (rows.length === 0) throw notFound('User not found');
+    if (rows[0].is_admin) throw badRequest('Admin accounts cannot be changed here.');
+    if (exempt) {
+      await disableUserTwofa(targetId);
+    } else {
+      try {
+        await pool.query('UPDATE users SET twofa_exempt = 0 WHERE id = ?', [targetId]);
+      } catch (e) {
+        if (e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
+      }
+    }
+    let refreshed;
+    try {
+      [refreshed] = await pool.query(
+        `SELECT id, name, email, avatar_url, is_admin, is_suspended,
+                suspension_reason, suspended_at, twofa_enabled, twofa_exempt, created_at
+         FROM users WHERE id = ?`,
+        [targetId]
+      );
+    } catch (e) {
+      if (e?.code !== 'ER_BAD_FIELD_ERROR') throw e;
+      [refreshed] = await pool.query(
+        `SELECT id, name, email, avatar_url, is_admin, is_suspended,
+                suspension_reason, suspended_at, twofa_enabled, created_at
+         FROM users WHERE id = ?`,
+        [targetId]
+      );
+    }
     res.json(mapAdminUser(refreshed[0]));
   })
 );

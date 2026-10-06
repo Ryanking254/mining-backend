@@ -70,6 +70,7 @@ export async function migrate() {
       twofa_secret VARCHAR(255) NULL,
       twofa_enabled TINYINT(1) NOT NULL DEFAULT 0,
       twofa_backup_codes TEXT NULL,
+      twofa_exempt TINYINT(1) NOT NULL DEFAULT 0,
       is_admin TINYINT(1) NOT NULL DEFAULT 0,
       is_suspended TINYINT(1) NOT NULL DEFAULT 0,
       suspension_reason TEXT NULL,
@@ -190,6 +191,21 @@ export async function migrate() {
       CONSTRAINT fk_sb_batch FOREIGN KEY (batch_id) REFERENCES batches (id),
       INDEX idx_sb_sale (sale_id),
       INDEX idx_sb_batch (batch_id)
+    )`,
+    // 2FA disable requests — user asks to turn off the authenticator app, but
+    // it stays ON until an admin approves. History rows stay for audit.
+    `CREATE TABLE IF NOT EXISTS twofa_disable_requests (
+      id INT AUTO_INCREMENT PRIMARY KEY,
+      user_id INT NOT NULL,
+      status ENUM('PENDING','APPROVED','REJECTED','CANCELLED') NOT NULL DEFAULT 'PENDING',
+      reason VARCHAR(1000) NULL,
+      admin_note VARCHAR(1000) NULL,
+      created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      decided_at TIMESTAMP NULL,
+      decided_by INT NULL,
+      INDEX idx_tdr_user (user_id),
+      INDEX idx_tdr_status (status),
+      CONSTRAINT fk_tdr_user FOREIGN KEY (user_id) REFERENCES users (id) ON DELETE CASCADE
     )`,
   ];
   for (const sql of ddl) {
@@ -360,6 +376,7 @@ export async function migrate() {
     ['twofa_secret', 'twofa_secret VARCHAR(255) NULL'],
     ['twofa_enabled', 'twofa_enabled TINYINT(1) NOT NULL DEFAULT 0'],
     ['twofa_backup_codes', 'twofa_backup_codes TEXT NULL'],
+    ['twofa_exempt', 'twofa_exempt TINYINT(1) NOT NULL DEFAULT 0'],
     ['is_admin', 'is_admin TINYINT(1) NOT NULL DEFAULT 0'],
     ['is_suspended', 'is_suspended TINYINT(1) NOT NULL DEFAULT 0'],
     ['suspension_reason', 'suspension_reason TEXT NULL'],
