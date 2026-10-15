@@ -95,4 +95,64 @@ router.patch(
   })
 );
 
+/**
+ * PATCH /api/loans/:id/topup — Body: { amount }
+ * Lends more on top of an existing loan (borrower takes another amount while
+ * a balance is still pending). Increases amount_given, keeps amount_repaid,
+ * writes a row to loan_topups, and recomputes status (a REPAID loan reopens).
+ */
+router.patch(
+  '/:id/topup',
+  ah(async (req, res) => {
+    const amount = Number(req.body?.amount);
+    if (!Number.isFinite(amount) || amount <= 0) throw badRequest('amount must be a positive number');
+
+    const conn = await pool.getConnection();
+    try {
+      await conn.beginTransaction();
+      const [rows] = await conn.query('SELECT * FROM loans WHERE id = ? AND user_id = ? FOR UPDATE', [req.params.id, req.user.id]);
+      if (rows.length === 0) {
+        await conn.rollback();
+        throw notFound('Loan not found');
+      }
+      const loan = rows[0];
+      const given = Number(loan.amount_given);
+      const repaid = Number(loan.amount_repaid);
+      const newGiven = given + amount;
+      await conn.query('INSERT INTO loan_topups (loan_id, amount) VALUES (?, ?)', [loan.id, amount]);
+      await conn.query('UPDATE loans SET amount_given = ?, status = ? WHERE id = ?', [
+        newGiven.toFixed(2),
+        statusFor(newGiven, repaid),
+        loan.id,
+      ]);
+      await conn.commit();
+      const [updated] = await pool.query('SELECT * FROM loans WHERE id = ? AND user_id = ?', [loan.id, req.user.id]);
+      res.json(mapLoan(updated[0]));
+    } catch (e) {
+      try {
+        await conn.rollback();
+      } catch {
+        /* already handled */
+      }
+      throw e;
+    } finally {
+      conn.release();
+    }
+  })
+);
+
+/** GET /api/loans/:id/topups — top-up history for one loan (newest first). */
+router.get(
+  '/:id/topups',
+  ah(async (req, res) => {
+    const [loanRows] = await pool.query('SELECT id FROM loans WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    if (loanRows.length === 0) throw notFound('Loan not found');
+    const [rows] = await pool.query(
+      'SELECT id, loan_id AS loanId, amount, created_at AS createdAt FROM loan_topups WHERE loan_id = ? ORDER BY id DESC',
+      [req.params.id]
+    );
+    res.json(rows.map((r) => ({ ...r, amount: Number(r.amount) })));
+  })
+);
+
 export default router;

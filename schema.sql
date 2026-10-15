@@ -106,6 +106,17 @@ CREATE TABLE IF NOT EXISTS loan_repayments (
   INDEX idx_repay_loan (loan_id)
 );
 
+-- Top-ups: extra amounts lent on top of an existing loan (increases
+-- loans.amount_given; history rows stay for audit).
+CREATE TABLE IF NOT EXISTS loan_topups (
+  id INT AUTO_INCREMENT PRIMARY KEY,
+  loan_id INT NOT NULL,
+  amount DECIMAL(14, 2) NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  CONSTRAINT fk_topup_loan FOREIGN KEY (loan_id) REFERENCES loans (id) ON DELETE CASCADE,
+  INDEX idx_topup_loan (loan_id)
+);
+
 CREATE TABLE IF NOT EXISTS expenditures (
   id INT AUTO_INCREMENT PRIMARY KEY,
   user_id INT NULL,
