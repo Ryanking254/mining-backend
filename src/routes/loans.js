@@ -155,4 +155,29 @@ router.get(
   })
 );
 
+/**
+ * GET /api/loans/:id/history — full event history for one loan, oldest first:
+ * every repayment (amount + day) and every top-up (amount + day).
+ * The initial "borrowed" event is the loan row itself (dateGiven).
+ */
+router.get(
+  '/:id/history',
+  ah(async (req, res) => {
+    const [loanRows] = await pool.query('SELECT id FROM loans WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    if (loanRows.length === 0) throw notFound('Loan not found');
+    const [repayments] = await pool.query(
+      'SELECT id, loan_id AS loanId, amount, repaid_at AS repaidAt FROM loan_repayments WHERE loan_id = ? ORDER BY id ASC',
+      [req.params.id]
+    );
+    const [topups] = await pool.query(
+      'SELECT id, loan_id AS loanId, amount, created_at AS createdAt FROM loan_topups WHERE loan_id = ? ORDER BY id ASC',
+      [req.params.id]
+    );
+    res.json({
+      repayments: repayments.map((r) => ({ ...r, amount: Number(r.amount) })),
+      topups: topups.map((r) => ({ ...r, amount: Number(r.amount) })),
+    });
+  })
+);
+
 export default router;
